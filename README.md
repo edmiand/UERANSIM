@@ -26,6 +26,49 @@ On the other hand, UERANSIM does not fully provide physical layer. 5G-NR radio i
 <img src="https://img.shields.io/badge/User%20Plane-functional-green" alt="OS Linux"/>
 </p>
 
+## Requirements
+
+- Linux (kernel 4.15+ recommended; SCTP module must be loaded)
+- CMake 3.17+
+- GCC/G++ with C++17 support (GCC 9+ or Clang 10+)
+
+## Installation
+
+**1. Install dependencies (Ubuntu/Debian):**
+
+```bash
+sudo apt update
+sudo apt install -y git cmake make gcc g++ libsctp-dev lksctp-tools
+```
+
+**2. Clone and build:**
+
+```bash
+git clone https://github.com/aligungr/UERANSIM.git
+cd UERANSIM
+make
+```
+
+Binaries are written to `build/`: `nr-gnb`, `nr-ue`, `nr-cli`, `nr-binder`.
+
+## Running
+
+```bash
+# Start gNB (must run before UEs)
+sudo build/nr-gnb -c config/open5gs-gnb.yaml
+
+# Start UE
+sudo build/nr-ue -c config/open5gs-ue.yaml
+
+# CLI control of a running UE
+build/nr-cli <ue-name> --exec "ps-list"
+
+# Bind app traffic to a specific UE TUN interface
+sudo build/nr-binder <ue-tun-interface> <command>
+```
+
+Edit the YAML files under `config/` to match your 5G core network (MCC, MNC, AMF address, SUPI, keys, etc.) before running.
+
 ## Documentation
 
 You can find the documentation on [UERANSIM Wiki](https://github.com/aligungr/UERANSIM/wiki).
