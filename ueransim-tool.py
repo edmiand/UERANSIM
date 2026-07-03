@@ -9,9 +9,11 @@ import argparse
 import os
 import re
 import signal
+import time
 from pathlib import Path
 from typing import Optional
 
+from rich.markup import escape as rich_escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -29,27 +31,28 @@ CLI_BIN = BIN / "nr-cli"
 
 
 # ── log-based state detection ─────────────────────────────────────────────────
-# Success/failure is inferred from characteristic log lines emitted by nr-gnb/nr-ue
-# (see src/gnb/ngap/interface.cpp, src/gnb/sctp/task.cpp, src/ue/app/task.cpp,
-# src/ue/nas/mm/register.cpp, src/ue/nas/mm/radio.cpp, src/ue/nas/mm/access.cpp).
+# Success is inferred from characteristic log lines emitted by nr-gnb/nr-ue.
+# Failure is NOT matched against a curated list of known failure messages: nr-gnb/nr-ue
+# can log a failure/rejection in many different ways (auth reject, RRC failure, SM
+# reject, timer expiry, config errors, ...) and any allow-list of message text goes
+# stale and leaves the UI stuck on "Starting..." whenever a new/unlisted failure log
+# line appears. Instead we rely on the log *level*: spdlog's default pattern
+# ("[%Y-%m-%d %H:%M:%S.%e] [%n] [%l] %v") tags every line with its level, and
+# logger->err()/fatal() in this codebase (src/utils/logger.hpp/.cpp) is only ever used
+# to report conditions that are not success. So "not success" == "saw an [error] or
+# [critical] level line", per the "everything that isn't success is failure" rule.
 GNB_ATTACH_RE = re.compile(r"NG Setup procedure is successful")
-GNB_FAIL_RE = re.compile(
-    r"NG Setup procedure is failed"
-    r"|Binding to .* failed"
-    r"|Connecting to .* failed"
-    r"|Association terminated for AMF"
-)
-
 UE_ATTACH_RE = re.compile(r"Connection setup for PDU session\[\d+\] is successful")
-UE_FAIL_RE = re.compile(
-    r"failed \["  # e.g. "INITIAL_REGISTRATION failed [cause]"
-    r"|RRC Establishment failure"
-    r"|Radio link failure detected"
-    r"|PLMN selection failure"
-    r"|UAC access attempt is barred"
-)
+
+FAIL_LEVEL_RE = re.compile(r"\[(error|critical)\]")
 
 EXIT_CODE_RE = re.compile(r"process exited \(code (-?\d+)\)")
+
+# Some failure modes (e.g. the network silently dropping a request instead of
+# rejecting it) never produce an [error]/[critical] log line at all — only a
+# debug-level timer expiry, which isn't surfaced to this tool. So "Starting..."
+# also counts as "not success" once it has dragged on too long.
+STARTING_TIMEOUT_SECS = 20
 
 
 # ── process wrapper ───────────────────────────────────────────────────────────
@@ -85,7 +88,10 @@ class NodeProcess:
     async def _stream(self, cb):
         try:
             async for line in self._proc.stdout:
-                cb(line.decode(errors="replace").rstrip())
+                # nr-gnb/nr-ue output is plain text, not Rich markup: escape it so
+                # bracketed content (timestamps, logger name, level tag) is displayed
+                # verbatim instead of being parsed/swallowed as bogus markup tags.
+                cb(rich_escape(line.decode(errors="replace").rstrip()))
         except Exception:
             pass
         returncode = await self._proc.wait()
@@ -127,6 +133,9 @@ class NodeStatus(Static):
 
     def set_attached(self, node: str):
         self.status = f"[bold green]● {node}: Attached[/bold green]"
+
+    def set_connected(self, node: str):
+        self.status = f"[bold green]● {node}: Connected[/bold green]"
 
     def set_failed(self, node: str):
         self.status = f"[bold red]✗ {node}: Failed[/bold red]"
@@ -218,6 +227,8 @@ class Dashboard(App):
         self.ue_state = "stopped"
         self._gnb_stopping = False
         self._ue_stopping = False
+        self._gnb_starting_since: Optional[float] = None
+        self._ue_starting_since: Optional[float] = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -299,6 +310,7 @@ class Dashboard(App):
             return
         self._gnb_log(f"[green]Starting gNB: {' '.join(self.gnb.cmd)}[/green]")
         self.gnb_state = "starting"
+        self._gnb_starting_since = time.monotonic()
         self._update_status()
         try:
             await self.gnb.start(self._gnb_log)
@@ -324,13 +336,14 @@ class Dashboard(App):
     # ── UE control ───────────────────────────────────────────────────────────
     async def _start_ue(self):
         if self.gnb_state != "attached":
-            self._ue_log("[red]Start gNB first (must be Attached).[/red]")
+            self._ue_log("[red]Start gNB first (must be Connected).[/red]")
             return
         if self.ue.running:
             self._ue_log("[yellow]UE already running[/yellow]")
             return
         self._ue_log(f"[green]Starting UE: {' '.join(self.ue.cmd)}[/green]")
         self.ue_state = "starting"
+        self._ue_starting_since = time.monotonic()
         self._update_status()
         try:
             await self.ue.start(self._ue_log)
@@ -395,10 +408,10 @@ class Dashboard(App):
     # ── log-based state classification ───────────────────────────────────────
     def _classify_gnb(self, msg: str):
         changed = True
-        if GNB_FAIL_RE.search(msg):
-            self.gnb_state = "failed"
-        elif GNB_ATTACH_RE.search(msg):
+        if GNB_ATTACH_RE.search(msg):
             self.gnb_state = "attached"
+        elif FAIL_LEVEL_RE.search(msg):
+            self.gnb_state = "failed"
         else:
             m = EXIT_CODE_RE.search(msg)
             if m and not self._gnb_stopping and int(m.group(1)) != 0:
@@ -410,10 +423,10 @@ class Dashboard(App):
 
     def _classify_ue(self, msg: str):
         changed = True
-        if UE_FAIL_RE.search(msg):
-            self.ue_state = "failed"
-        elif UE_ATTACH_RE.search(msg):
+        if UE_ATTACH_RE.search(msg):
             self.ue_state = "attached"
+        elif FAIL_LEVEL_RE.search(msg):
+            self.ue_state = "failed"
         else:
             m = EXIT_CODE_RE.search(msg)
             if m and not self._ue_stopping and int(m.group(1)) != 0:
@@ -424,13 +437,37 @@ class Dashboard(App):
             self._update_status()
 
     # ── status update ─────────────────────────────────────────────────────────
+    def _check_starting_timeouts(self):
+        now = time.monotonic()
+        if (
+            self.gnb_state == "starting"
+            and self._gnb_starting_since is not None
+            and now - self._gnb_starting_since > STARTING_TIMEOUT_SECS
+        ):
+            self.gnb_state = "failed"
+            self._gnb_log(
+                f"[bold red]gNB did not reach Connected within {STARTING_TIMEOUT_SECS}s "
+                f"(no error logged; treating as failed)[/bold red]"
+            )
+        if (
+            self.ue_state == "starting"
+            and self._ue_starting_since is not None
+            and now - self._ue_starting_since > STARTING_TIMEOUT_SECS
+        ):
+            self.ue_state = "failed"
+            self._ue_log(
+                f"[bold red]UE did not reach Attached within {STARTING_TIMEOUT_SECS}s "
+                f"(no error logged; treating as failed)[/bold red]"
+            )
+
     def _update_status(self):
+        self._check_starting_timeouts()
         gnb_s = self.query_one("#gnb-status", NodeStatus)
         ue_s = self.query_one("#ue-status", NodeStatus)
         {
             "stopped": lambda: gnb_s.set_stopped("gNB"),
             "starting": lambda: gnb_s.set_starting("gNB"),
-            "attached": lambda: gnb_s.set_attached("gNB"),
+            "attached": lambda: gnb_s.set_connected("gNB"),
             "failed": lambda: gnb_s.set_failed("gNB"),
         }[self.gnb_state]()
         {
