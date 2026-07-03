@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-UERANSIM Dashboard — side-by-side gNB and UE log viewer with sidebar control menu.
-Usage: python3 nr-dashboard.py [--gnb-config CONFIG] [--ue-config CONFIG]
+UERANSIM Tool — side-by-side gNB and UE log viewer with sidebar control menu.
+Usage: python3 ueransim-tool.py [--gnb-config CONFIG] [--ue-config CONFIG]
 """
 
 import asyncio
 import argparse
 import os
+import re
 import signal
 from pathlib import Path
 from typing import Optional
@@ -25,6 +26,30 @@ CFG = BASE / "config"
 GNB_BIN = BIN / "nr-gnb"
 UE_BIN = BIN / "nr-ue"
 CLI_BIN = BIN / "nr-cli"
+
+
+# ── log-based state detection ─────────────────────────────────────────────────
+# Success/failure is inferred from characteristic log lines emitted by nr-gnb/nr-ue
+# (see src/gnb/ngap/interface.cpp, src/gnb/sctp/task.cpp, src/ue/app/task.cpp,
+# src/ue/nas/mm/register.cpp, src/ue/nas/mm/radio.cpp, src/ue/nas/mm/access.cpp).
+GNB_ATTACH_RE = re.compile(r"NG Setup procedure is successful")
+GNB_FAIL_RE = re.compile(
+    r"NG Setup procedure is failed"
+    r"|Binding to .* failed"
+    r"|Connecting to .* failed"
+    r"|Association terminated for AMF"
+)
+
+UE_ATTACH_RE = re.compile(r"Connection setup for PDU session\[\d+\] is successful")
+UE_FAIL_RE = re.compile(
+    r"failed \["  # e.g. "INITIAL_REGISTRATION failed [cause]"
+    r"|RRC Establishment failure"
+    r"|Radio link failure detected"
+    r"|PLMN selection failure"
+    r"|UAC access attempt is barred"
+)
+
+EXIT_CODE_RE = re.compile(r"process exited \(code (-?\d+)\)")
 
 
 # ── process wrapper ───────────────────────────────────────────────────────────
@@ -94,14 +119,17 @@ class NodeStatus(Static):
     def render(self) -> str:
         return self.status
 
-    def set_running(self, node: str):
-        self.status = f"[bold green]● {node}: Running[/bold green]"
-
     def set_stopped(self, node: str):
         self.status = f"[dim]○ {node}: Stopped[/dim]"
 
-    def set_crashed(self, node: str):
-        self.status = f"[bold red]✗ {node}: Crashed[/bold red]"
+    def set_starting(self, node: str):
+        self.status = f"[bold yellow]◐ {node}: Starting...[/bold yellow]"
+
+    def set_attached(self, node: str):
+        self.status = f"[bold green]● {node}: Attached[/bold green]"
+
+    def set_failed(self, node: str):
+        self.status = f"[bold red]✗ {node}: Failed[/bold red]"
 
 
 # ── main app ──────────────────────────────────────────────────────────────────
@@ -185,6 +213,11 @@ class Dashboard(App):
         self.ue = NodeProcess("UE", ["sudo", str(UE_BIN), "-c", ue_config])
         self._gnb_lines: list[str] = []
         self._ue_lines: list[str] = []
+        # one of: "stopped", "starting", "attached", "failed"
+        self.gnb_state = "stopped"
+        self.ue_state = "stopped"
+        self._gnb_stopping = False
+        self._ue_stopping = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -265,34 +298,58 @@ class Dashboard(App):
             self._gnb_log("[yellow]gNB already running[/yellow]")
             return
         self._gnb_log(f"[green]Starting gNB: {' '.join(self.gnb.cmd)}[/green]")
-        await self.gnb.start(self._gnb_log)
+        self.gnb_state = "starting"
+        self._update_status()
+        try:
+            await self.gnb.start(self._gnb_log)
+        except Exception as e:
+            self._gnb_log(f"[bold red]Failed to start gNB: {e}[/bold red]")
+            self.gnb_state = "failed"
         self._update_status()
 
     async def _stop_gnb(self):
         if not self.gnb.running:
+            if self.gnb_state == "failed":
+                self.gnb_state = "stopped"
+                self._update_status()
             return
         self._gnb_log("[yellow]Stopping gNB...[/yellow]")
+        self._gnb_stopping = True
         await self.gnb.stop()
+        self._gnb_stopping = False
+        self.gnb_state = "stopped"
         self._update_status()
         self._gnb_log("[dim]gNB stopped.[/dim]")
 
     # ── UE control ───────────────────────────────────────────────────────────
     async def _start_ue(self):
-        if not self.gnb.running:
-            self._ue_log("[red]Start gNB first.[/red]")
+        if self.gnb_state != "attached":
+            self._ue_log("[red]Start gNB first (must be Attached).[/red]")
             return
         if self.ue.running:
             self._ue_log("[yellow]UE already running[/yellow]")
             return
         self._ue_log(f"[green]Starting UE: {' '.join(self.ue.cmd)}[/green]")
-        await self.ue.start(self._ue_log)
+        self.ue_state = "starting"
+        self._update_status()
+        try:
+            await self.ue.start(self._ue_log)
+        except Exception as e:
+            self._ue_log(f"[bold red]Failed to start UE: {e}[/bold red]")
+            self.ue_state = "failed"
         self._update_status()
 
     async def _stop_ue(self):
         if not self.ue.running:
+            if self.ue_state == "failed":
+                self.ue_state = "stopped"
+                self._update_status()
             return
         self._ue_log("[yellow]Stopping UE...[/yellow]")
+        self._ue_stopping = True
         await self.ue.stop()
+        self._ue_stopping = False
+        self.ue_state = "stopped"
         self._update_status()
         self._ue_log("[dim]UE stopped.[/dim]")
 
@@ -328,28 +385,64 @@ class Dashboard(App):
     def _gnb_log(self, msg: str):
         self._gnb_lines.append(msg)
         self.query_one("#gnb-log", RichLog).write(msg)
+        self._classify_gnb(msg)
 
     def _ue_log(self, msg: str):
         self._ue_lines.append(msg)
         self.query_one("#ue-log", RichLog).write(msg)
+        self._classify_ue(msg)
+
+    # ── log-based state classification ───────────────────────────────────────
+    def _classify_gnb(self, msg: str):
+        changed = True
+        if GNB_FAIL_RE.search(msg):
+            self.gnb_state = "failed"
+        elif GNB_ATTACH_RE.search(msg):
+            self.gnb_state = "attached"
+        else:
+            m = EXIT_CODE_RE.search(msg)
+            if m and not self._gnb_stopping and int(m.group(1)) != 0:
+                self.gnb_state = "failed"
+            else:
+                changed = False
+        if changed:
+            self._update_status()
+
+    def _classify_ue(self, msg: str):
+        changed = True
+        if UE_FAIL_RE.search(msg):
+            self.ue_state = "failed"
+        elif UE_ATTACH_RE.search(msg):
+            self.ue_state = "attached"
+        else:
+            m = EXIT_CODE_RE.search(msg)
+            if m and not self._ue_stopping and int(m.group(1)) != 0:
+                self.ue_state = "failed"
+            else:
+                changed = False
+        if changed:
+            self._update_status()
 
     # ── status update ─────────────────────────────────────────────────────────
     def _update_status(self):
         gnb_s = self.query_one("#gnb-status", NodeStatus)
         ue_s = self.query_one("#ue-status", NodeStatus)
-        if self.gnb.running:
-            gnb_s.set_running("gNB")
-        else:
-            gnb_s.set_stopped("gNB")
-        if self.ue.running:
-            ue_s.set_running("UE")
-        else:
-            ue_s.set_stopped("UE")
+        {
+            "stopped": lambda: gnb_s.set_stopped("gNB"),
+            "starting": lambda: gnb_s.set_starting("gNB"),
+            "attached": lambda: gnb_s.set_attached("gNB"),
+            "failed": lambda: gnb_s.set_failed("gNB"),
+        }[self.gnb_state]()
+        {
+            "stopped": lambda: ue_s.set_stopped("UE"),
+            "starting": lambda: ue_s.set_starting("UE"),
+            "attached": lambda: ue_s.set_attached("UE"),
+            "failed": lambda: ue_s.set_failed("UE"),
+        }[self.ue_state]()
 
     def _save_logs(self):
-        import re
         ansi_escape = re.compile(r'\[.*?[mGKH]|\[/?[a-z ]*\]')
-        log_path = BASE / "nr-dashboard.log"
+        log_path = BASE / "ueransim-tool.log"
         with open(log_path, "w") as f:
             f.write("=== gNB LOG ===\n")
             for line in self._gnb_lines:
@@ -369,7 +462,7 @@ class Dashboard(App):
 
 # ── entry point ───────────────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(description="UERANSIM TUI Dashboard")
+    parser = argparse.ArgumentParser(description="UERANSIM Tool")
     parser.add_argument("--gnb-config", default=str(CFG / "open5gs-gnb.yaml"),
                         help="Path to gNB config YAML")
     parser.add_argument("--ue-config", default=str(CFG / "open5gs-ue.yaml"),
