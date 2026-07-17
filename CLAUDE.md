@@ -28,9 +28,11 @@ The Makefile runs CMake into `cmake-build-release/` then copies binaries to `bui
 ```bash
 # Start gNB (must run before UEs)
 build/nr-gnb -c config/open5gs-gnb.yaml
+# or: ./start-gnb.sh
 
 # Start UE(s)
-build/nr-ue -c config/open5gs-ue.yaml
+sudo build/nr-ue -c config/open5gs-ue.yaml
+# or: ./start-ue.sh
 
 # CLI control of running instances
 build/nr-cli --help
@@ -40,6 +42,12 @@ build/nr-cli <ue-name> --exec "ps-establish IPv4 --sst 1 --sd 1 --dnn internet"
 # Bind app traffic to a specific UE interface
 sudo build/nr-binder <ue-tun-interface> <command>
 ```
+
+`start-gnb.sh` / `start-ue.sh` are thin wrappers that resolve paths relative to the repo root and (for the UE) invoke `sudo` for TUN device creation.
+
+### ueransim-tool (operator TUI)
+
+`ueransim-tool.py` is a Python/[textual](https://github.com/Textualize/textual) terminal UI that runs gNB and UE side by side, streams their logs, derives Connected/Failed status from log content (not just process liveness), and exposes PDU session and deregistration commands. See `UERANSIM-TOOL.md` for full usage, the sidebar menu reference, and the passwordless-sudo setup needed for the UE process. This tool is operator tooling for local testing, not part of the simulator itself — it lives outside `src/`.
 
 ## Architecture
 
