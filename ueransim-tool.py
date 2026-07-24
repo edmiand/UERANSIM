@@ -83,6 +83,13 @@ class NodeProcess:
                 await asyncio.wait_for(self._proc.wait(), timeout=5)
             except asyncio.TimeoutError:
                 self._proc.kill()
+                await self._proc.wait()
+        if self._proc is not None:
+            # Close the pipe transport now, while the loop is still running.
+            # Otherwise it's closed by __del__ after the loop has already
+            # shut down, which logs a harmless but noisy
+            # "RuntimeError: Event loop is closed".
+            self._proc._transport.close()
         self._proc = None
 
     async def _stream(self, cb):
@@ -378,6 +385,7 @@ class Dashboard(App):
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+            proc._transport.close()
             lines = [l.strip() for l in out.decode().splitlines() if l.strip()]
             ue_nodes = [l for l in lines if "imsi-" in l or "UERANSIM-UE" in l]
             if not ue_nodes:
@@ -389,6 +397,7 @@ class Dashboard(App):
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
             )
             out2, _ = await asyncio.wait_for(proc2.communicate(), timeout=10)
+            proc2._transport.close()
             for line in out2.decode().splitlines():
                 self._ue_log(f"[cyan][cli] {line}[/cyan]")
         except Exception as e:
