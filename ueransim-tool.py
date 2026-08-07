@@ -8,101 +8,20 @@ import asyncio
 import argparse
 import os
 import re
-import signal
 import time
-from pathlib import Path
 from typing import Optional
 
-from rich.markup import escape as rich_escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widgets import Footer, Header, Label, ListItem, ListView, RichLog, Static
 
-# ── paths ────────────────────────────────────────────────────────────────────
-BASE = Path(__file__).parent
-BIN = BASE / "build"
-CFG = BASE / "config"
-
-GNB_BIN = BIN / "nr-gnb"
-UE_BIN = BIN / "nr-ue"
-CLI_BIN = BIN / "nr-cli"
-
-
-# ── log-based state detection ─────────────────────────────────────────────────
-# Success is inferred from characteristic log lines emitted by nr-gnb/nr-ue.
-# Failure is NOT matched against a curated list of known failure messages: nr-gnb/nr-ue
-# can log a failure/rejection in many different ways (auth reject, RRC failure, SM
-# reject, timer expiry, config errors, ...) and any allow-list of message text goes
-# stale and leaves the UI stuck on "Starting..." whenever a new/unlisted failure log
-# line appears. Instead we rely on the log *level*: spdlog's default pattern
-# ("[%Y-%m-%d %H:%M:%S.%e] [%n] [%l] %v") tags every line with its level, and
-# logger->err()/fatal() in this codebase (src/utils/logger.hpp/.cpp) is only ever used
-# to report conditions that are not success. So "not success" == "saw an [error] or
-# [critical] level line", per the "everything that isn't success is failure" rule.
-GNB_ATTACH_RE = re.compile(r"NG Setup procedure is successful")
-UE_ATTACH_RE = re.compile(r"Connection setup for PDU session\[\d+\] is successful")
-
-FAIL_LEVEL_RE = re.compile(r"\[(error|critical)\]")
-
-EXIT_CODE_RE = re.compile(r"process exited \(code (-?\d+)\)")
-
-# Some failure modes (e.g. the network silently dropping a request instead of
-# rejecting it) never produce an [error]/[critical] log line at all — only a
-# debug-level timer expiry, which isn't surfaced to this tool. So "Starting..."
-# also counts as "not success" once it has dragged on too long.
-STARTING_TIMEOUT_SECS = 20
-
-
-# ── process wrapper ───────────────────────────────────────────────────────────
-class NodeProcess:
-    def __init__(self, name: str, cmd: list[str]):
-        self.name = name
-        self.cmd = cmd
-        self._proc: Optional[asyncio.subprocess.Process] = None
-
-    @property
-    def running(self) -> bool:
-        return self._proc is not None and self._proc.returncode is None
-
-    async def start(self, log_cb):
-        if self.running:
-            return
-        self._proc = await asyncio.create_subprocess_exec(
-            *self.cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        asyncio.create_task(self._stream(log_cb))
-
-    async def stop(self):
-        if self._proc and self._proc.returncode is None:
-            self._proc.send_signal(signal.SIGTERM)
-            try:
-                await asyncio.wait_for(self._proc.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                self._proc.kill()
-                await self._proc.wait()
-        if self._proc is not None:
-            # Close the pipe transport now, while the loop is still running.
-            # Otherwise it's closed by __del__ after the loop has already
-            # shut down, which logs a harmless but noisy
-            # "RuntimeError: Event loop is closed".
-            self._proc._transport.close()
-        self._proc = None
-
-    async def _stream(self, cb):
-        try:
-            async for line in self._proc.stdout:
-                # nr-gnb/nr-ue output is plain text, not Rich markup: escape it so
-                # bracketed content (timestamps, logger name, level tag) is displayed
-                # verbatim instead of being parsed/swallowed as bogus markup tags.
-                cb(rich_escape(line.decode(errors="replace").rstrip()))
-        except Exception:
-            pass
-        returncode = await self._proc.wait()
-        cb(f"[bold red]--- process exited (code {returncode}) ---[/bold red]")
+from ueransim_core import (
+    BASE, CFG, GNB_BIN, UE_BIN,
+    GNB_ATTACH_RE, UE_ATTACH_RE, STARTING_TIMEOUT_SECS,
+    NodeProcess, classify, discover_nodes, cli_exec,
+)
 
 
 # ── menu items ────────────────────────────────────────────────────────────────
@@ -380,25 +299,12 @@ class Dashboard(App):
             return
         # discover UE node name via --dump
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "sudo", str(CLI_BIN), "-d",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-            proc._transport.close()
-            lines = [l.strip() for l in out.decode().splitlines() if l.strip()]
-            ue_nodes = [l for l in lines if "imsi-" in l or "UERANSIM-UE" in l]
+            ue_nodes = await discover_nodes()
             if not ue_nodes:
-                self._ue_log(f"[red]No UE node found via nr-cli -d (saw: {lines})[/red]")
+                self._ue_log(f"[red]No UE node found via nr-cli -d[/red]")
                 return
-            node = ue_nodes[0]
-            proc2 = await asyncio.create_subprocess_exec(
-                "sudo", str(CLI_BIN), node, "--exec", cmd,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-            )
-            out2, _ = await asyncio.wait_for(proc2.communicate(), timeout=10)
-            proc2._transport.close()
-            for line in out2.decode().splitlines():
+            out = await cli_exec(ue_nodes[0], cmd)
+            for line in out.splitlines():
                 self._ue_log(f"[cyan][cli] {line}[/cyan]")
         except Exception as e:
             self._ue_log(f"[red]CLI error: {e}[/red]")
@@ -416,33 +322,15 @@ class Dashboard(App):
 
     # ── log-based state classification ───────────────────────────────────────
     def _classify_gnb(self, msg: str):
-        changed = True
-        if GNB_ATTACH_RE.search(msg):
-            self.gnb_state = "attached"
-        elif FAIL_LEVEL_RE.search(msg):
-            self.gnb_state = "failed"
-        else:
-            m = EXIT_CODE_RE.search(msg)
-            if m and not self._gnb_stopping and int(m.group(1)) != 0:
-                self.gnb_state = "failed"
-            else:
-                changed = False
-        if changed:
+        new_state = classify(self.gnb_state, msg, GNB_ATTACH_RE, self._gnb_stopping)
+        if new_state is not None:
+            self.gnb_state = new_state
             self._update_status()
 
     def _classify_ue(self, msg: str):
-        changed = True
-        if UE_ATTACH_RE.search(msg):
-            self.ue_state = "attached"
-        elif FAIL_LEVEL_RE.search(msg):
-            self.ue_state = "failed"
-        else:
-            m = EXIT_CODE_RE.search(msg)
-            if m and not self._ue_stopping and int(m.group(1)) != 0:
-                self.ue_state = "failed"
-            else:
-                changed = False
-        if changed:
+        new_state = classify(self.ue_state, msg, UE_ATTACH_RE, self._ue_stopping)
+        if new_state is not None:
+            self.ue_state = new_state
             self._update_status()
 
     # ── status update ─────────────────────────────────────────────────────────

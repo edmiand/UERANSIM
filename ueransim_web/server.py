@@ -1,0 +1,259 @@
+"""
+aiohttp application: REST API + WebSocket log/state stream + static file
+serving for the UERANSIM web dashboard. See UERANSIM-WEB.md for the full
+API reference and behavior notes.
+"""
+
+import asyncio
+import re
+import time
+from collections import deque
+from pathlib import Path
+
+from aiohttp import web, WSMsgType
+
+from ueransim_core import cli_exec, classify, GNB_ATTACH_RE, UE_ATTACH_RE
+from ueransim_web.registry import GnbController, UeRegistry
+
+STATIC_DIR = Path(__file__).parent / "static"
+LOG_BUFFER_MAX = 50
+
+COLOR_GNB = "#7dd3fc"
+COLOR_SUCCESS = "#86efac"
+COLOR_FAIL = "#fca5a5"
+
+# Rich markup tags are only ever unescaped ("[bold red]", never "\[bold red]") in the
+# lines we pass through here — real spdlog output was rich_escape()'d upstream in
+# NodeProcess, so a literal "[info]"/"[nr-gnb]" always arrives as "\[info]"/"\[nr-gnb]"
+# and is protected by the negative lookbehind below. Only genuine (unescaped) markup
+# tags get stripped; escaped brackets are then unescaped back to plain "[", "]".
+_TAG_RE = re.compile(r"(?<!\\)\[/?[a-zA-Z ]*\]")
+
+
+def strip_rich(text: str) -> str:
+    text = _TAG_RE.sub("", text)
+    return text.replace("\\[", "[")
+
+
+def make_app(gnb_config: str, ue_config: str) -> web.Application:
+    app = web.Application()
+    ws_clients: set[web.WebSocketResponse] = set()
+    log_buffer: deque = deque(maxlen=LOG_BUFFER_MAX)
+
+    def broadcast(payload: dict):
+        dead = []
+        for ws in ws_clients:
+            if ws.closed:
+                dead.append(ws)
+                continue
+            asyncio.create_task(ws.send_json(payload))
+        for ws in dead:
+            ws_clients.discard(ws)
+
+    def tag_for(source: str) -> str:
+        if source == "gnb":
+            return "[gnb]"
+        # source is "ue:<id>"
+        ue_id = int(source.split(":", 1)[1])
+        entry = ues.get(ue_id)
+        return f"[{entry.name}]" if entry else f"[{source}]"
+
+    def on_log(source: str, text: str, level: str):
+        clean = strip_rich(text)
+        if level == "fail":
+            color = COLOR_FAIL
+        elif source == "gnb":
+            color = COLOR_GNB
+        else:
+            color = COLOR_SUCCESS
+        entry = {
+            "type": "log",
+            "source": source,
+            "tag": tag_for(source),
+            "color": color,
+            "time": time.strftime("%H:%M:%S"),
+            "text": clean,
+        }
+        log_buffer.append(entry)
+        broadcast(entry)
+
+    def on_gnb_state(state: str):
+        broadcast({"type": "gnb_state", "state": state})
+
+    def on_ue_state(entry):
+        broadcast({"type": "ue_state", **entry.snapshot()})
+
+    gnb = GnbController(gnb_config, lambda src, text: on_log(src, text, _classify_level_gnb(gnb, text)), on_gnb_state)
+    ues = UeRegistry(ue_config, lambda src, text: on_log(src, text, _classify_level_ue(ues, src, text)), on_ue_state)
+
+    app["gnb"] = gnb
+    app["ues"] = ues
+
+    def fire_cli(entry, cmd: str, label: str):
+        async def _run():
+            try:
+                out = await cli_exec(entry.node_name, cmd)
+                for line in out.splitlines():
+                    if line.strip():
+                        on_log(f"ue:{entry.id}", f"[cli] {line}", "info")
+            except Exception as e:
+                on_log(f"ue:{entry.id}", f"[cli] {label} error: {e}", "fail")
+        asyncio.create_task(_run())
+
+    # ── gNB routes ──────────────────────────────────────────────────────────
+    async def get_gnb(request):
+        return web.json_response(gnb.snapshot())
+
+    async def start_gnb(request):
+        try:
+            await gnb.start()
+        except RuntimeError as e:
+            return web.json_response({"error": str(e)}, status=409)
+        return web.json_response({}, status=202)
+
+    async def stop_gnb(request):
+        await gnb.stop()
+        return web.json_response({}, status=202)
+
+    # ── UE routes ───────────────────────────────────────────────────────────
+    async def list_ues(request):
+        return web.json_response(ues.list())
+
+    async def add_ue(request):
+        body = await request.json()
+        name = (body.get("name") or "").strip()
+        imsi = (body.get("imsi") or "").strip()
+        if not imsi:
+            return web.json_response({"error": "imsi is required"}, status=400)
+        if not name:
+            name = f"imsi-{imsi}"
+        entry = ues.add(name, imsi)
+        if gnb.state == "attached":
+            try:
+                await ues.start(entry.id)
+            except PermissionError as e:
+                on_log(f"ue:{entry.id}", f"[web] {e}", "fail")
+        else:
+            on_log(f"ue:{entry.id}", "[web] gNB is not attached yet — added but not started", "info")
+        return web.json_response(entry.snapshot(), status=201)
+
+    async def start_ue(request):
+        ue_id = int(request.match_info["id"])
+        if gnb.state != "attached":
+            return web.json_response({"error": "Start gNB first (must be Connected)"}, status=409)
+        try:
+            await ues.start(ue_id)
+        except KeyError:
+            return web.json_response({"error": "no such UE"}, status=404)
+        except (RuntimeError, PermissionError) as e:
+            return web.json_response({"error": str(e)}, status=409)
+        return web.json_response({}, status=202)
+
+    async def stop_ue(request):
+        ue_id = int(request.match_info["id"])
+        try:
+            await ues.stop(ue_id)
+        except KeyError:
+            return web.json_response({"error": "no such UE"}, status=404)
+        return web.json_response({}, status=202)
+
+    async def remove_ue(request):
+        ue_id = int(request.match_info["id"])
+        try:
+            await ues.remove(ue_id)
+        except KeyError:
+            return web.json_response({"error": "no such UE"}, status=404)
+        return web.json_response({}, status=204)
+
+    async def _pdu_action(request, cmd: str, label: str):
+        ue_id = int(request.match_info["id"])
+        entry = ues.get(ue_id)
+        if entry is None:
+            return web.json_response({"error": "no such UE"}, status=404)
+        if not entry.running:
+            return web.json_response({"error": "UE is not running"}, status=409)
+        fire_cli(entry, cmd, label)
+        return web.json_response({}, status=202)
+
+    async def pdu_list(request):
+        return await _pdu_action(request, "ps-list", "ps-list")
+
+    async def pdu_establish(request):
+        return await _pdu_action(request, "ps-establish IPv4 --sst 1 --sd 1 --dnn internet", "ps-establish")
+
+    async def pdu_release_all(request):
+        return await _pdu_action(request, "ps-release-all", "ps-release-all")
+
+    async def deregister(request):
+        return await _pdu_action(request, "deregister switch-off", "deregister")
+
+    # ── WebSocket ───────────────────────────────────────────────────────────
+    async def ws_handler(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        ws_clients.add(ws)
+        await ws.send_json({
+            "type": "snapshot",
+            "gnb": gnb.snapshot(),
+            "ues": ues.list(),
+            "logs": list(log_buffer),
+        })
+        try:
+            async for msg in ws:
+                if msg.type == WSMsgType.ERROR:
+                    break
+        finally:
+            ws_clients.discard(ws)
+        return ws
+
+    async def index(request):
+        return web.FileResponse(STATIC_DIR / "index.html")
+
+    async def on_shutdown(app):
+        await gnb.stop()
+        await ues.stop_all()
+
+    app.router.add_get("/", index)
+    app.router.add_get("/api/gnb", get_gnb)
+    app.router.add_post("/api/gnb/start", start_gnb)
+    app.router.add_post("/api/gnb/stop", stop_gnb)
+    app.router.add_get("/api/ues", list_ues)
+    app.router.add_post("/api/ues", add_ue)
+    app.router.add_post("/api/ues/{id}/start", start_ue)
+    app.router.add_post("/api/ues/{id}/stop", stop_ue)
+    app.router.add_delete("/api/ues/{id}", remove_ue)
+    app.router.add_get("/api/ues/{id}/pdu", pdu_list)
+    app.router.add_post("/api/ues/{id}/pdu/establish", pdu_establish)
+    app.router.add_post("/api/ues/{id}/pdu/release-all", pdu_release_all)
+    app.router.add_post("/api/ues/{id}/deregister", deregister)
+    app.router.add_get("/ws", ws_handler)
+    app.router.add_static("/static", STATIC_DIR)
+    app.on_shutdown.append(on_shutdown)
+
+    return app
+
+
+# classify() needs the "is this a fail/attach/info line" verdict per node kind; these
+# small wrappers keep GnbController/UeRegistry's own state machine untouched (registry.py
+# already calls classify() itself to update .state) while letting the log broadcaster
+# derive the same verdict for line coloring, from the *pre-transition* state.
+def _classify_level_gnb(gnb, text: str) -> str:
+    new_state = classify(gnb.state, text, GNB_ATTACH_RE, gnb.stopping)
+    if new_state == "failed":
+        return "fail"
+    if new_state == "attached":
+        return "success"
+    return "info"
+
+
+def _classify_level_ue(ues, source: str, text: str) -> str:
+    ue_id = int(source.split(":", 1)[1])
+    entry = ues.get(ue_id)
+    if entry is None:
+        return "info"
+    new_state = classify(entry.state, text, UE_ATTACH_RE, entry.stopping)
+    if new_state == "failed":
+        return "fail"
+    if new_state == "attached":
+        return "success"
+    return "info"

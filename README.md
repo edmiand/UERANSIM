@@ -69,6 +69,38 @@ sudo build/nr-binder <ue-tun-interface> <command>
 
 Edit the YAML files under `config/` to match your 5G core network (MCC, MNC, AMF address, SUPI, keys, etc.) before running.
 
+## Operator Tooling
+
+Two optional operator tools sit alongside the simulator (outside `src/`, not part of UERANSIM itself) for running gNB/UE side by side without juggling terminals: [`ueransim-tool.py`](UERANSIM-TOOL.md), a terminal UI, and [`ueransim-web.py`](UERANSIM-WEB.md), a browser dashboard. Both drive the same `nr-gnb`/`nr-ue`/`nr-cli` binaries built above and share their process-management/state logic via `ueransim_core.py`.
+
+**On a fresh VM, install these on top of the build requirements already covered above:**
+
+```bash
+# Python 3.10+ and pip (Ubuntu/Debian usually ship python3; pip3 may need installing)
+sudo apt install -y python3 python3-pip
+
+# TUI dependency
+pip3 install --user --break-system-packages textual
+
+# Web dashboard dependency
+pip3 install --user --break-system-packages aiohttp
+
+# PyYAML is used by both tools' config parsing — usually already present as
+# python3-yaml on Debian/Ubuntu; if not:
+pip3 install --user --break-system-packages pyyaml
+```
+
+`--break-system-packages` is only needed on distros that enforce [PEP 668](https://peps.python.org/pep-0668/) (Debian/Ubuntu 23.04+); older systems accept plain `pip3 install --user`. `python3-yaml`/`python3-aiohttp` are also available as reasonably current distro packages (`sudo apt install python3-yaml python3-aiohttp`) if you'd rather avoid pip for those two — but stick to `pip3 install textual`: the `python3-textual` apt package on Debian/Ubuntu is a long-abandoned `0.1.x` release, far too old for this repo's TUI code.
+
+**`nr-ue` needs root** to create its TUN interface — both tools invoke it via `sudo`. Add a passwordless sudoers entry once so neither tool prompts for a password (see [UERANSIM-TOOL.md](UERANSIM-TOOL.md#behavior-notes) for the exact command).
+
+```bash
+./ueransim-tool.py     # terminal UI
+./ueransim-web.py      # browser dashboard, http://<this-host>:8088 by default
+```
+
+`ueransim-web.py` can also run as a systemd service that starts automatically on boot — see [UERANSIM-WEB.md](UERANSIM-WEB.md#autostart-on-boot-systemd) for the one-time `systemctl enable` setup.
+
 ## Documentation
 
 You can find the documentation on [UERANSIM Wiki](https://github.com/aligungr/UERANSIM/wiki).

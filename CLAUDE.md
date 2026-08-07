@@ -49,6 +49,10 @@ sudo build/nr-binder <ue-tun-interface> <command>
 
 `ueransim-tool.py` is a Python/[textual](https://github.com/Textualize/textual) terminal UI that runs gNB and UE side by side, streams their logs, derives Connected/Failed status from log content (not just process liveness), and exposes PDU session and deregistration commands. See `UERANSIM-TOOL.md` for full usage, the sidebar menu reference, and the passwordless-sudo setup needed for the UE process. This tool is operator tooling for local testing, not part of the simulator itself — it lives outside `src/`.
 
+### ueransim-web (browser operator dashboard)
+
+`ueransim-web.py` is a Python/[aiohttp](https://docs.aiohttp.org/) web server exposing a browser dashboard for the same gNB/UE control surface as `ueransim-tool.py` — start/stop gNB, add/start/stop/remove UEs, PDU session and deregistration commands, and a live merged log stream over a WebSocket. It shares its process-management and log-classification logic with the TUI via `ueransim_core.py`, so state derivation is identical between the two tools. `start-web.sh`/`stop-web.sh` wrap it (same convention as `start-gnb.sh`/`start-ue.sh`), and `systemd/ueransim-web.service` runs it as a boot-time systemd service. See `UERANSIM-WEB.md` for the API reference, systemd install steps, and behavior notes (binds all interfaces by default, single-running-UE limitation, no state persistence across restarts). Also operator tooling outside `src/`, not part of the simulator itself.
+
 ## Architecture
 
 ### Threading Model: NTS (Nested Task System)

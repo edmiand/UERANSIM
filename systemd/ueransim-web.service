@@ -1,0 +1,17 @@
+[Unit]
+Description=UERANSIM Web Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=dmandrey
+WorkingDirectory=/home/dmandrey/UERANSIM
+ExecStart=/home/dmandrey/UERANSIM/start-web.sh
+Restart=on-failure
+RestartSec=3
+# The dashboard process itself doesn't need root — only the sudo nr-ue/nr-cli
+# child processes it spawns do, via the passwordless-sudoers entry documented
+# in UERANSIM-TOOL.md. Do not set User=root here.
+
+[Install]
+WantedBy=multi-user.target
