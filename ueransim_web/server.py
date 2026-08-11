@@ -10,7 +10,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from aiohttp import web, WSMsgType
+from aiohttp import web, WSMsgType, WSCloseCode
 
 from ueransim_core import cli_exec, classify, GNB_ATTACH_RE, UE_ATTACH_RE
 from ueransim_web.registry import GnbController, UeRegistry
@@ -210,6 +210,16 @@ def make_app(gnb_config: str, ue_config: str) -> web.Application:
         return web.FileResponse(STATIC_DIR / "index.html")
 
     async def on_shutdown(app):
+        # Close WS connections server-side first — the client-driven `async for
+        # msg in ws` loop in ws_handler otherwise blocks aiohttp's shutdown
+        # (default 60s timeout) waiting for a close frame that a passive log
+        # listener never sends, which can push total shutdown past systemd's
+        # TimeoutStopSec and get the process SIGKILLed mid-cleanup.
+        await asyncio.gather(
+            *(ws.close(code=WSCloseCode.GOING_AWAY, message=b"server shutdown")
+              for ws in list(ws_clients)),
+            return_exceptions=True,
+        )
         await gnb.stop()
         await ues.stop_all()
 

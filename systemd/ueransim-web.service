@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 User=dmandrey
 WorkingDirectory=/home/dmandrey/UERANSIM
-ExecStart=/home/dmandrey/UERANSIM/start-web.sh
+ExecStart=/home/dmandrey/UERANSIM/web-ctl.sh run
 Restart=on-failure
 RestartSec=3
 # The dashboard process itself doesn't need root — only the sudo nr-ue/nr-cli
