@@ -32,7 +32,17 @@ pip3 install aiohttp
 
 The startup banner prints the actual reachable URL(s) for the host it's running on (e.g. `http://192.168.64.20:8088`) — bind defaults to `0.0.0.0` precisely so this works unchanged on any machine/VM regardless of its IP.
 
-`start-web.sh` / `stop-web.sh` are thin wrappers, same convention as `start-gnb.sh`/`start-ue.sh`: `start-web.sh` resolves paths relative to the repo root, checks `aiohttp` is installed, and execs `ueransim-web.py` (any extra args are passed through). `stop-web.sh` stops it via `systemctl` if running as the systemd service below, otherwise falls back to finding and signaling the process directly.
+`web-ctl.sh` is a lifecycle wrapper, same convention as `start-gnb.sh`/`start-ue.sh`, with `start`/`stop`/`restart`/`status`/`run` subcommands:
+
+```bash
+sudo ./web-ctl.sh start     # start (via systemctl if the unit below is installed, else backgrounds it directly)
+sudo ./web-ctl.sh stop      # stop it
+sudo ./web-ctl.sh restart   # restart it
+./web-ctl.sh status         # is it running?
+./web-ctl.sh run            # foreground, no daemonizing — what systemd's ExecStart uses; extra args pass through to ueransim-web.py
+```
+
+`start`/`stop`/`restart` shell out to `systemctl` when the `ueransim-web.service` unit is installed (see below), and fall back to backgrounding/signaling the process directly otherwise.
 
 ## Autostart on boot (systemd)
 
@@ -49,7 +59,7 @@ Useful commands:
 ```bash
 sudo systemctl status ueransim-web     # is it running?
 sudo journalctl -u ueransim-web -f     # follow its logs (startup banner, gNB/UE process output)
-sudo systemctl stop ueransim-web       # stop it (or: ./stop-web.sh)
+sudo systemctl stop ueransim-web       # stop it (or: ./web-ctl.sh stop)
 sudo systemctl disable ueransim-web    # stop autostarting on boot
 ```
 
