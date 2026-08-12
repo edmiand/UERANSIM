@@ -70,6 +70,19 @@ class GnbController:
         new_state = classify(self.state, line, GNB_ATTACH_RE, self._stopping)
         if new_state is not None:
             self._set_state(new_state)
+            if new_state == "failed":
+                # An [error]/[critical] log line means nr-gnb hit a problem (e.g. SCTP
+                # "Connection refused" because the AMF is down) — but nr-gnb doesn't
+                # necessarily exit, it may just keep retrying in the background. Kill it
+                # so "failed" is truthful and Start doesn't hit the already-running
+                # guard below on the next click.
+                asyncio.create_task(self._kill_if_running())
+
+    async def _kill_if_running(self):
+        if self._proc.running:
+            self._stopping = True
+            await self._proc.stop()
+            self._stopping = False
 
     async def start(self):
         if self._proc.running:
@@ -92,6 +105,12 @@ class GnbController:
                     f"(no error logged; treating as failed)[/bold red]"
                 )
                 self._set_state("failed")
+                # The process is still alive at this point (it just hasn't attached) —
+                # kill it so the "failed" state actually matches reality. Otherwise the
+                # UI shows "Failed"/not-running (no Stop button, see app.js) while the
+                # real nr-gnb process lingers, and a subsequent Start hits the
+                # already-running guard above with a confusing error.
+                await self._kill_if_running()
                 return
 
     async def stop(self):
@@ -173,6 +192,17 @@ class UeEntry:
         new_state = classify(self.state, line, UE_ATTACH_RE, self._stopping)
         if new_state is not None:
             self._set_state(new_state)
+            if new_state == "failed":
+                # Same reasoning as GnbController._log: an [error]/[critical] line
+                # doesn't guarantee nr-ue actually exited, so kill it explicitly to
+                # keep "failed" truthful and avoid an already-running guard on retry.
+                asyncio.create_task(self._kill_if_running())
+
+    async def _kill_if_running(self):
+        if self._proc.running:
+            self._stopping = True
+            await self._proc.stop()
+            self._stopping = False
 
     async def start(self):
         if self._proc.running:
@@ -196,6 +226,10 @@ class UeEntry:
                     f"(no error logged; treating as failed)[/bold red]"
                 )
                 self._set_state("failed")
+                # Same reasoning as GnbController._starting_timeout_watch: the process
+                # is still alive here, so kill it to keep "failed" truthful and avoid
+                # a subsequent Start hitting the already-running guard.
+                await self._kill_if_running()
                 return
 
     async def _status_poll_loop(self):
