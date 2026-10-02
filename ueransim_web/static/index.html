@@ -3,122 +3,105 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>UERANSIM — Simulator Console</title>
+<title>UERANSIM</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<div class="layout">
 
-  <div class="main">
-
-    <div class="topbar">
-      <div class="brand">
-        <div class="brand-icon"><span class="ring"></span></div>
-        <div>
-          <div class="brand-title">UERANSIM <span class="brand-sub">Simulator Console</span></div>
-          <div class="page-sub">Core network: <b>open5gs-core-01</b> · <span id="amf-note">AMF status unknown</span></div>
-        </div>
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <div class="brand">
+      <div class="brand-mark">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5a7 7 0 0 1 14 0"/><path d="M8.5 12.5a3.5 3.5 0 0 1 7 0"/><circle cx="12" cy="12.5" r="1"/><path d="M12 13.5V20"/></svg>
       </div>
-      <div class="summary" id="summary"></div>
-      <div class="actions">
-        <button id="btn-toggle-gnb" class="btn btn-outline">▶ Start gNB</button>
+      <div>
+        <div class="brand-title">UERANSIM</div>
+        <div class="brand-sub">5G Radio Network and UE Simulator</div>
       </div>
     </div>
-
-    <div class="content">
-
-      <!-- GNB + TOPOLOGY -->
-      <div class="card gnb-card">
-        <div class="gnb-head">
-          <div class="card-title">gNodeB — nr-gnb-01</div>
-          <div class="status-pill" id="gnb-status-pill">
-            <span class="status-dot" id="gnb-status-dot"></span>
-            <span id="gnb-status-label">Stopped</span>
-          </div>
-        </div>
-        <div class="topology">
-          <div class="topo-node">
-            <div class="topo-icon topo-icon-core">🖧</div>
-            <div class="topo-label">Core (AMF)</div>
-          </div>
-          <div class="topo-line" id="link-line-1"></div>
-          <div class="topo-node">
-            <div class="topo-icon" id="gnb-node-icon">📡</div>
-            <div class="topo-label">nr-gnb-01</div>
-          </div>
-          <div class="topo-line" id="link-line-2"></div>
-          <div class="topo-node">
-            <div class="topo-icon topo-icon-ue">📱</div>
-            <div class="topo-label">nr-ue-01</div>
-          </div>
-        </div>
-        <div class="field-grid" id="gnb-fields"></div>
-      </div>
-
-      <!-- UE TABLE -->
-      <div class="card ue-table-card">
-        <div class="card-header">
-          <div class="card-title">User Equipment</div>
-        </div>
-        <div class="ue-table-head">
-          <div>IMSI / Name</div><div>Reg. state</div><div>RRC state</div><div>Signal</div><div>Data (uesimtun)</div><div></div>
-        </div>
-        <div id="ue-table-body"></div>
-      </div>
-
-      <div class="bottom-row">
-
-      <!-- UE DATA PLANE -->
-      <div class="card dp-card">
-        <div class="card-header">
-          <div class="card-title">UE data plane <span class="muted" id="dp-target">— no UE attached</span></div>
-          <div class="status-pill" id="dp-pill">
-            <span class="status-dot"></span>
-            <span id="dp-pill-label">No PDU session</span>
-          </div>
-        </div>
-        <div class="dp-grid">
-          <div class="dp-pane">
-            <div class="dp-pane-head">
-              <span class="log-panel-title">Command console</span>
-              <span class="dp-hint">ping / curl · bound to the UE interface automatically</span>
-            </div>
-            <div id="dp-console" class="dp-output"></div>
-            <form id="dp-form" class="dp-form" autocomplete="off">
-              <span class="dp-prompt" id="dp-prompt">ue $</span>
-              <input id="dp-input" type="text" spellcheck="false" placeholder="ping -c 4 google.com">
-              <button type="submit" id="dp-run" class="btn btn-primary">Run</button>
-              <button type="button" id="dp-stop" class="btn btn-outline" disabled>Stop</button>
-            </form>
-            <div class="dp-presets" id="dp-presets">
-              <button type="button" class="chip" data-cmd="ping -c 4 google.com">ping -c 4 google.com</button>
-              <button type="button" class="chip" data-cmd="ping -c 4 8.8.8.8">ping -c 4 8.8.8.8</button>
-              <button type="button" class="chip" data-cmd="curl -sI https://www.google.com">curl -sI https://www.google.com</button>
-            </div>
-          </div>
-          <div class="dp-pane">
-            <div class="dp-pane-head">
-              <span class="log-panel-title">UDP inbox</span>
-              <span class="dp-hint" id="dp-udp-addr">not listening</span>
-              <button type="button" id="dp-udp-clear" class="dp-clear">Clear</button>
-            </div>
-            <div id="dp-udp" class="dp-output"></div>
-            <div class="dp-hint dp-udp-help" id="dp-udp-help">From the core host: <code>echo "hello" | nc -u -w1 &lt;UE IP&gt; 9000</code></div>
-          </div>
-        </div>
-      </div>
-
-      <!-- LOG PANEL -->
-      <div class="log-panel">
-        <div class="log-panel-title">Live log</div>
-        <div id="log-lines" class="log-lines"></div>
-      </div>
-
-      </div>
-
-    </div>
+    <div class="spacer"></div>
+    <div class="pill pill-lg" id="overall" role="status"><span class="dot"></span><span id="overall-label">Offline</span></div>
   </div>
-</div>
+</header>
+
+<main class="wrap main">
+
+  <!-- Network map -->
+  <section class="card" aria-labelledby="net-title">
+    <div class="card-head">
+      <h2 id="net-title">Your network</h2>
+      <span class="muted">Data travels left to right: phone, gNB, core network, internet.</span>
+      <div class="spacer"></div>
+      <button type="button" class="btn btn-ghost btn-sm" id="btn-details" aria-expanded="false" aria-controls="details">
+        <span id="details-label">Technical details</span>
+        <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
+    </div>
+    <div class="net-map" id="net-map"></div>
+    <div class="details" id="details" hidden></div>
+  </section>
+
+  <div class="bottom-row">
+
+    <!-- Test the connection -->
+    <section class="card test-card" aria-labelledby="test-title">
+      <div class="card-head">
+        <h2 id="test-title">Test the connection</h2>
+        <div class="spacer"></div>
+        <div class="seg" role="tablist" aria-label="Test tools">
+          <button type="button" role="tab" id="tab-term" aria-selected="true" aria-controls="pane-term">Send traffic</button>
+          <button type="button" role="tab" id="tab-inbox" aria-selected="false" aria-controls="pane-inbox">Incoming messages <span class="badge" id="inbox-badge">0</span></button>
+        </div>
+      </div>
+
+      <div id="pane-term" role="tabpanel" aria-labelledby="tab-term" class="pane">
+        <div class="presets" id="dp-presets">
+          <span class="muted strong">Quick tests</span>
+          <button type="button" class="chip" data-cmd="ping -c 4 google.com" title="ping -c 4 google.com"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round" aria-hidden="true"><path d="M6 4l14 8-14 8z"/></svg>Ping google.com</button>
+          <button type="button" class="chip" data-cmd="ping -c 4 8.8.8.8" title="ping -c 4 8.8.8.8"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round" aria-hidden="true"><path d="M6 4l14 8-14 8z"/></svg>Ping 8.8.8.8</button>
+          <button type="button" class="chip" data-cmd="curl -sI https://www.google.com" title="curl -sI https://www.google.com"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round" aria-hidden="true"><path d="M6 4l14 8-14 8z"/></svg>Load a web page</button>
+        </div>
+        <div id="dp-console" class="terminal"></div>
+        <form id="dp-form" class="cmd-form" autocomplete="off">
+          <label class="cmd-input" for="dp-input">
+            <span class="prompt" id="dp-prompt">offline $</span>
+            <input id="dp-input" type="text" spellcheck="false" placeholder="ping -c 4 google.com" aria-label="Command to run from the phone">
+          </label>
+          <button type="submit" id="dp-run" class="btn btn-primary">Run</button>
+          <button type="button" id="dp-stop" class="btn btn-ghost" disabled>Stop</button>
+        </form>
+        <div class="muted small">Commands run on the simulated phone and use its 5G connection automatically.</div>
+      </div>
+
+      <div id="pane-inbox" role="tabpanel" aria-labelledby="tab-inbox" class="pane" hidden>
+        <div class="inbox-head">
+          <span class="pill" id="listen-pill"><span class="dot"></span><span id="listen-label">Not listening</span></span>
+          <span class="muted" id="listen-note">The phone receives UDP messages on port 9000.</span>
+          <div class="spacer"></div>
+          <button type="button" id="dp-udp-clear" class="btn btn-ghost btn-xs">Clear</button>
+        </div>
+        <div id="dp-udp" class="inbox"></div>
+      </div>
+    </section>
+
+    <!-- Activity -->
+    <section class="card activity-card" aria-labelledby="act-title">
+      <div class="card-head">
+        <h2 id="act-title">Activity</h2>
+        <div class="spacer"></div>
+        <div class="seg" role="tablist" aria-label="Log view">
+          <button type="button" role="tab" id="tab-hi" aria-selected="true" aria-controls="log-hi">Highlights</button>
+          <button type="button" role="tab" id="tab-raw" aria-selected="false" aria-controls="log-raw">Full log</button>
+        </div>
+      </div>
+      <ol id="log-hi" class="highlights" role="tabpanel" aria-labelledby="tab-hi"></ol>
+      <div id="log-raw" class="terminal raw-log" role="tabpanel" aria-labelledby="tab-raw" hidden></div>
+    </section>
+
+  </div>
+</main>
 
 <script src="/static/app.js"></script>
 </body>

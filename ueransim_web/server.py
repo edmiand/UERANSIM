@@ -77,6 +77,7 @@ def make_app(gnb_config: str, ue_config: str, ue_imsi: str = UE_IMSI_DEFAULT,
             "source": source,
             "tag": tag_for(source),
             "color": color,
+            "level": level,
             "time": time.strftime("%H:%M:%S"),
             "text": clean,
         }
