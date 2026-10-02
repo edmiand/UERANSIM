@@ -145,8 +145,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 
 /* ── bottom row ─────────────────────────────────────────────────────────── */
 .bottom-row { display: flex; flex-wrap: wrap; gap: 20px; align-items: stretch; }
-.test-card { flex: 7 1 560px; min-width: 0; display: flex; flex-direction: column; }
-.activity-card { flex: 5 1 380px; min-width: 0; display: flex; flex-direction: column; }
+.test-card { flex: 1 1 480px; min-width: 0; display: flex; flex-direction: column; }
+.activity-card { flex: 1 1 480px; min-width: 0; display: flex; flex-direction: column; }
 .test-card .card-head, .activity-card .card-head { margin-bottom: 14px; }
 .pane { display: flex; flex-direction: column; gap: 12px; }
 
@@ -227,6 +227,21 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .hi-meta { font-size: 12px; color: var(--muted); }
 .hi-empty { color: var(--muted); padding: 10px 0; border: none !important; }
 .raw-log { height: 410px; font-size: 12px; line-height: 1.65; }
+
+/* ── fit to window ───────────────────────────────────────────────────────
+   On desktop-sized windows the page fills the viewport exactly: the bottom row
+   takes whatever height is left and its console/inbox/log panes scroll inside.
+   Smaller windows fall back to the fixed pane heights above and page scrolling. */
+@media (min-width: 1000px) and (min-height: 640px) {
+  body { height: 100vh; display: flex; flex-direction: column; }
+  .topbar { flex: 0 0 auto; }
+  .main { flex: 1 1 auto; min-height: 0; width: 100%; gap: 16px; padding-top: 16px; padding-bottom: 16px; }
+  .main > .card { flex: 0 0 auto; }
+  .bottom-row { flex: 1 1 0; min-height: 0; flex-wrap: nowrap; gap: 16px; }
+  .test-card, .activity-card { min-height: 0; }
+  .pane { flex: 1 1 0; min-height: 0; }
+  .terminal, .inbox, .highlights, .raw-log { flex: 1 1 0; min-height: 120px; height: auto; }
+}
 
 /* ── narrow screens ─────────────────────────────────────────────────────── */
 @media (max-width: 1100px) {
