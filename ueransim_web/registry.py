@@ -15,6 +15,7 @@ from ueransim_core import (
     GNB_ATTACH_RE, UE_ATTACH_RE, STARTING_TIMEOUT_SECS,
     NodeProcess, classify, cli_exec,
 )
+from ueransim_web.dataplane import UE_TUN_RE, UDP_PORT_DEFAULT, CommandConsole, UdpInbox
 
 # How often a running UE's NAS state (cm-state/rm-state, via `nr-cli <node> --exec status`)
 # is polled to refresh the reg/RRC-ish columns in the UE table between log-driven transitions.
@@ -128,6 +129,7 @@ class UeEntry:
     def __init__(
         self, id: int, name: str, imsi: str, config_path: str,
         on_log: Callable[[str, str], None], on_state: Callable[["UeEntry"], None],
+        on_dataplane: Callable[["UeEntry", dict], None], udp_port: int = UDP_PORT_DEFAULT,
     ):
         self.id = id
         self.name = name
@@ -146,6 +148,14 @@ class UeEntry:
         self._on_state = on_state
         self._timeout_task: Optional[asyncio.Task] = None
         self._poll_task: Optional[asyncio.Task] = None
+        # TUN details parsed from nr-ue's attach line: {"iface", "ip", "ns"}; None while
+        # no PDU session is up. Drives the data-plane console and the UDP inbox.
+        self.tun: Optional[dict] = None
+        self._on_dataplane = on_dataplane
+        self.console = CommandConsole(
+            lambda kind, text: on_dataplane(self, {"type": "ue_console", "kind": kind, "text": text}))
+        self.inbox = UdpInbox(
+            udp_port, lambda msg: on_dataplane(self, {"type": "ue_udp", **msg}))
 
     @property
     def running(self) -> bool:
@@ -161,6 +171,8 @@ class UeEntry:
 
     @property
     def iface(self) -> str:
+        if self.connected and self.tun:
+            return self.tun["iface"]
         return "uesimtun0" if self.connected else "—"
 
     def snapshot(self) -> dict:
@@ -173,6 +185,10 @@ class UeEntry:
             "rrcState": self.cm_state,
             "connected": self.connected,
             "iface": self.iface,
+            "ip": self.tun["ip"] if self.tun else None,
+            "udpPort": self.inbox.port,
+            "udpListening": self.inbox.listening,
+            "cmdBusy": self.console.busy,
         }
 
     def _set_state(self, new_state: str):
@@ -184,11 +200,16 @@ class UeEntry:
         elif new_state in ("stopped", "failed"):
             self.reg_state = "deregistered"
             self.cm_state = "CM-IDLE"
+            self._teardown_dataplane()
         if changed:
             self._on_state(self)
 
     def _log(self, line: str):
         self._on_log(f"ue:{self.id}", line)
+        m = UE_TUN_RE.search(line)
+        if m:
+            self.tun = {"iface": m["iface"], "ip": m["ip"], "ns": m["ns"]}
+            asyncio.create_task(self._start_inbox())
         new_state = classify(self.state, line, UE_ATTACH_RE, self._stopping)
         if new_state is not None:
             self._set_state(new_state)
@@ -203,6 +224,40 @@ class UeEntry:
             self._stopping = True
             await self._proc.stop()
             self._stopping = False
+
+    # ── data plane (console + UDP inbox) ─────────────────────────────────────
+    async def _start_inbox(self):
+        tun = self.tun
+        if tun is None:
+            return
+        if tun["ns"]:
+            self._log(f"[yellow]UE TUN is in namespace {tun['ns']} — the UDP inbox and "
+                      f"command console only support useNamespace: false[/yellow]")
+            return
+        try:
+            await self.inbox.start(tun["ip"])
+            self._log(f"[green]UDP inbox listening on {tun['ip']}:{self.inbox.port}[/green]")
+        except OSError as e:
+            self._log(f"[yellow]UDP inbox could not bind {tun['ip']}:{self.inbox.port}: {e}[/yellow]")
+        self._on_state(self)
+
+    def _teardown_dataplane(self):
+        self.tun = None
+        self.inbox.close()
+        if self.console.busy:
+            asyncio.create_task(self.console.stop())
+
+    async def run_command(self, raw: str):
+        if not self.connected or self.tun is None:
+            raise RuntimeError("UE has no PDU session up")
+        if self.tun["ns"]:
+            raise RuntimeError("command console does not support useNamespace: true")
+        await self.console.run(raw, self.tun["iface"])
+        self._on_state(self)
+
+    async def stop_command(self):
+        await self.console.stop()
+        self._on_state(self)
 
     async def start(self):
         if self._proc.running:
@@ -268,6 +323,7 @@ class UeEntry:
         if self._poll_task is not None:
             self._poll_task.cancel()
             self._poll_task = None
+        await self.console.stop()
         if not self._proc.running:
             if self.state == "failed":
                 self._set_state("stopped")
@@ -282,8 +338,11 @@ class UeRegistry:
     def __init__(
         self, ue_config_path: str,
         on_log: Callable[[str, str], None], on_state: Callable[[UeEntry], None],
+        on_dataplane: Callable[[UeEntry, dict], None], udp_port: int = UDP_PORT_DEFAULT,
     ):
         self.ue_config_path = ue_config_path
+        self.udp_port = udp_port
+        self._on_dataplane = on_dataplane
         self._next_id = 1
         self.entries: dict[int, UeEntry] = {}
         self._on_log = on_log
@@ -298,7 +357,8 @@ class UeRegistry:
     def add(self, name: str, imsi: str) -> UeEntry:
         id = self._next_id
         self._next_id += 1
-        entry = UeEntry(id, name, imsi, self.ue_config_path, self._on_log, self._on_state)
+        entry = UeEntry(id, name, imsi, self.ue_config_path, self._on_log, self._on_state,
+                        self._on_dataplane, self.udp_port)
         self.entries[id] = entry
         return entry
 
@@ -323,13 +383,6 @@ class UeRegistry:
         if entry is None:
             raise KeyError(id)
         await entry.stop()
-
-    async def remove(self, id: int):
-        entry = self.entries.get(id)
-        if entry is None:
-            raise KeyError(id)
-        await entry.stop()
-        del self.entries[id]
 
     async def stop_all(self):
         for entry in list(self.entries.values()):

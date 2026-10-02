@@ -13,10 +13,15 @@ from pathlib import Path
 from aiohttp import web, WSMsgType, WSCloseCode
 
 from ueransim_core import cli_exec, classify, GNB_ATTACH_RE, UE_ATTACH_RE
+from ueransim_web.dataplane import CommandError, UDP_PORT_DEFAULT
 from ueransim_web.registry import GnbController, UeRegistry
 
 STATIC_DIR = Path(__file__).parent / "static"
 LOG_BUFFER_MAX = 50
+
+# The single UE the dashboard manages (key/OP come from the UE config YAML).
+UE_NAME = "nr-ue-01"
+UE_IMSI_DEFAULT = "999700000000001"
 
 COLOR_GNB = "#7dd3fc"
 COLOR_SUCCESS = "#86efac"
@@ -35,7 +40,8 @@ def strip_rich(text: str) -> str:
     return text.replace("\\[", "[")
 
 
-def make_app(gnb_config: str, ue_config: str) -> web.Application:
+def make_app(gnb_config: str, ue_config: str, ue_imsi: str = UE_IMSI_DEFAULT,
+             udp_port: int = UDP_PORT_DEFAULT) -> web.Application:
     app = web.Application()
     ws_clients: set[web.WebSocketResponse] = set()
     log_buffer: deque = deque(maxlen=LOG_BUFFER_MAX)
@@ -83,8 +89,14 @@ def make_app(gnb_config: str, ue_config: str) -> web.Application:
     def on_ue_state(entry):
         broadcast({"type": "ue_state", **entry.snapshot()})
 
+    def on_ue_dataplane(entry, payload: dict):
+        broadcast({"id": entry.id, **payload})
+
     gnb = GnbController(gnb_config, lambda src, text: on_log(src, text, _classify_level_gnb(gnb, text)), on_gnb_state)
-    ues = UeRegistry(ue_config, lambda src, text: on_log(src, text, _classify_level_ue(ues, src, text)), on_ue_state)
+    ues = UeRegistry(ue_config, lambda src, text: on_log(src, text, _classify_level_ue(ues, src, text)), on_ue_state,
+                     on_ue_dataplane, udp_port)
+    # The dashboard manages exactly one, permanently configured UE — no add/remove.
+    ues.add(UE_NAME, ue_imsi)
 
     app["gnb"] = gnb
     app["ues"] = ues
@@ -119,24 +131,6 @@ def make_app(gnb_config: str, ue_config: str) -> web.Application:
     async def list_ues(request):
         return web.json_response(ues.list())
 
-    async def add_ue(request):
-        body = await request.json()
-        name = (body.get("name") or "").strip()
-        imsi = (body.get("imsi") or "").strip()
-        if not imsi:
-            return web.json_response({"error": "imsi is required"}, status=400)
-        if not name:
-            name = f"imsi-{imsi}"
-        entry = ues.add(name, imsi)
-        if gnb.state == "attached":
-            try:
-                await ues.start(entry.id)
-            except PermissionError as e:
-                on_log(f"ue:{entry.id}", f"[web] {e}", "fail")
-        else:
-            on_log(f"ue:{entry.id}", "[web] gNB is not attached yet — added but not started", "info")
-        return web.json_response(entry.snapshot(), status=201)
-
     async def start_ue(request):
         ue_id = int(request.match_info["id"])
         if gnb.state != "attached":
@@ -156,14 +150,6 @@ def make_app(gnb_config: str, ue_config: str) -> web.Application:
         except KeyError:
             return web.json_response({"error": "no such UE"}, status=404)
         return web.json_response({}, status=202)
-
-    async def remove_ue(request):
-        ue_id = int(request.match_info["id"])
-        try:
-            await ues.remove(ue_id)
-        except KeyError:
-            return web.json_response({"error": "no such UE"}, status=404)
-        return web.json_response({}, status=204)
 
     async def _pdu_action(request, cmd: str, label: str):
         ue_id = int(request.match_info["id"])
@@ -187,6 +173,48 @@ def make_app(gnb_config: str, ue_config: str) -> web.Application:
     async def deregister(request):
         return await _pdu_action(request, "deregister switch-off", "deregister")
 
+    # ── data plane: command console + UDP inbox ─────────────────────────────
+    async def run_command(request):
+        ue_id = int(request.match_info["id"])
+        entry = ues.get(ue_id)
+        if entry is None:
+            return web.json_response({"error": "no such UE"}, status=404)
+        body = await request.json()
+        try:
+            await entry.run_command(body.get("cmd") or "")
+        except CommandError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except RuntimeError as e:
+            return web.json_response({"error": str(e)}, status=409)
+        return web.json_response({}, status=202)
+
+    async def stop_command(request):
+        ue_id = int(request.match_info["id"])
+        entry = ues.get(ue_id)
+        if entry is None:
+            return web.json_response({"error": "no such UE"}, status=404)
+        await entry.stop_command()
+        return web.json_response({}, status=202)
+
+    async def get_console(request):
+        ue_id = int(request.match_info["id"])
+        entry = ues.get(ue_id)
+        if entry is None:
+            return web.json_response({"error": "no such UE"}, status=404)
+        return web.json_response({"busy": entry.console.busy, "lines": list(entry.console.buffer)})
+
+    async def get_udp(request):
+        ue_id = int(request.match_info["id"])
+        entry = ues.get(ue_id)
+        if entry is None:
+            return web.json_response({"error": "no such UE"}, status=404)
+        return web.json_response({
+            "ip": entry.inbox.bound_ip,
+            "port": entry.inbox.port,
+            "listening": entry.inbox.listening,
+            "messages": list(entry.inbox.buffer),
+        })
+
     # ── WebSocket ───────────────────────────────────────────────────────────
     async def ws_handler(request):
         ws = web.WebSocketResponse()
@@ -197,6 +225,8 @@ def make_app(gnb_config: str, ue_config: str) -> web.Application:
             "gnb": gnb.snapshot(),
             "ues": ues.list(),
             "logs": list(log_buffer),
+            "console": {e.id: list(e.console.buffer) for e in ues.entries.values()},
+            "udp": {e.id: list(e.inbox.buffer) for e in ues.entries.values()},
         })
         try:
             async for msg in ws:
@@ -228,14 +258,16 @@ def make_app(gnb_config: str, ue_config: str) -> web.Application:
     app.router.add_post("/api/gnb/start", start_gnb)
     app.router.add_post("/api/gnb/stop", stop_gnb)
     app.router.add_get("/api/ues", list_ues)
-    app.router.add_post("/api/ues", add_ue)
     app.router.add_post("/api/ues/{id}/start", start_ue)
     app.router.add_post("/api/ues/{id}/stop", stop_ue)
-    app.router.add_delete("/api/ues/{id}", remove_ue)
     app.router.add_get("/api/ues/{id}/pdu", pdu_list)
     app.router.add_post("/api/ues/{id}/pdu/establish", pdu_establish)
     app.router.add_post("/api/ues/{id}/pdu/release-all", pdu_release_all)
     app.router.add_post("/api/ues/{id}/deregister", deregister)
+    app.router.add_get("/api/ues/{id}/exec", get_console)
+    app.router.add_post("/api/ues/{id}/exec", run_command)
+    app.router.add_post("/api/ues/{id}/exec/stop", stop_command)
+    app.router.add_get("/api/ues/{id}/udp", get_udp)
     app.router.add_get("/ws", ws_handler)
     app.router.add_static("/static", STATIC_DIR)
     app.on_shutdown.append(on_shutdown)

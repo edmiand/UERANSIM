@@ -9,95 +9,103 @@
 <body>
 <div class="layout">
 
-  <!-- SIDEBAR -->
-  <aside class="sidebar">
-    <div class="brand">
-      <div class="brand-icon"><span class="ring"></span></div>
-      <div>
-        <div class="brand-title">UERANSIM</div>
-        <div class="brand-sub">Simulator Console</div>
-      </div>
-    </div>
-
-    <nav class="nav">
-      <div class="nav-item active" data-nav="overview"><span class="nav-dot"></span><span>Overview</span></div>
-      <div class="nav-item" data-nav="gnb"><span class="nav-dot"></span><span>gNodeB config</span></div>
-      <div class="nav-item" data-nav="ue"><span class="nav-dot"></span><span>UE / subscribers</span><span class="badge" id="nav-ue-badge">0</span></div>
-      <div class="nav-item" data-nav="logs"><span class="nav-dot"></span><span>Live logs</span></div>
-      <div class="nav-item" data-nav="topology"><span class="nav-dot"></span><span>Topology</span></div>
-      <div class="nav-item" data-nav="settings"><span class="nav-dot"></span><span>Settings</span></div>
-    </nav>
-
-    <div class="demo-note">
-      <div class="demo-note-title">Live mode</div>
-      Controls real nr-gnb / nr-ue processes on this host. Only provisioned IMSIs will actually authenticate.
-    </div>
-  </aside>
-
-  <!-- MAIN -->
   <div class="main">
 
     <div class="topbar">
-      <div>
-        <div class="page-title">Overview</div>
-        <div class="page-sub">Core network: <b>open5gs-core-01</b> · <span id="amf-note">AMF status unknown</span></div>
+      <div class="brand">
+        <div class="brand-icon"><span class="ring"></span></div>
+        <div>
+          <div class="brand-title">UERANSIM <span class="brand-sub">Simulator Console</span></div>
+          <div class="page-sub">Core network: <b>open5gs-core-01</b> · <span id="amf-note">AMF status unknown</span></div>
+        </div>
       </div>
+      <div class="summary" id="summary"></div>
       <div class="actions">
-        <button id="btn-add-ue" class="btn btn-primary">+ Add UE</button>
         <button id="btn-toggle-gnb" class="btn btn-outline">▶ Start gNB</button>
       </div>
     </div>
 
     <div class="content">
 
-      <!-- STAT CARDS -->
-      <div class="stat-grid" id="stat-cards"></div>
-
-      <!-- GNB CARD + TOPOLOGY -->
-      <div class="two-col">
-        <div class="card">
-          <div class="card-header">
-            <div class="card-title">gNodeB — nr-gnb-01</div>
-            <div class="status-pill" id="gnb-status-pill">
-              <span class="status-dot" id="gnb-status-dot"></span>
-              <span id="gnb-status-label">Stopped</span>
-            </div>
-          </div>
-          <div class="field-grid" id="gnb-fields"></div>
-        </div>
-
-        <div class="card topology-card">
-          <div class="card-title">Link topology</div>
-          <div class="topology">
-            <div class="topo-node">
-              <div class="topo-icon topo-icon-core">🖧</div>
-              <div class="topo-label">Core (AMF)</div>
-            </div>
-            <div class="topo-line" id="link-line-1"></div>
-            <div class="topo-node">
-              <div class="topo-icon" id="gnb-node-icon">📡</div>
-              <div class="topo-label">nr-gnb-01</div>
-            </div>
-            <div class="topo-line" id="link-line-2"></div>
-            <div class="topo-node">
-              <div class="topo-icon topo-icon-ue">📱</div>
-              <div class="topo-label"><span id="connected-ue-count">0</span> UE(s)</div>
-            </div>
+      <!-- GNB + TOPOLOGY -->
+      <div class="card gnb-card">
+        <div class="gnb-head">
+          <div class="card-title">gNodeB — nr-gnb-01</div>
+          <div class="status-pill" id="gnb-status-pill">
+            <span class="status-dot" id="gnb-status-dot"></span>
+            <span id="gnb-status-label">Stopped</span>
           </div>
         </div>
+        <div class="topology">
+          <div class="topo-node">
+            <div class="topo-icon topo-icon-core">🖧</div>
+            <div class="topo-label">Core (AMF)</div>
+          </div>
+          <div class="topo-line" id="link-line-1"></div>
+          <div class="topo-node">
+            <div class="topo-icon" id="gnb-node-icon">📡</div>
+            <div class="topo-label">nr-gnb-01</div>
+          </div>
+          <div class="topo-line" id="link-line-2"></div>
+          <div class="topo-node">
+            <div class="topo-icon topo-icon-ue">📱</div>
+            <div class="topo-label">nr-ue-01</div>
+          </div>
+        </div>
+        <div class="field-grid" id="gnb-fields"></div>
       </div>
 
       <!-- UE TABLE -->
       <div class="card ue-table-card">
         <div class="card-header">
           <div class="card-title">User Equipment</div>
-          <div class="muted"><span id="ue-count">0</span> devices</div>
         </div>
         <div class="ue-table-head">
           <div>IMSI / Name</div><div>Reg. state</div><div>RRC state</div><div>Signal</div><div>Data (uesimtun)</div><div></div>
         </div>
         <div id="ue-table-body"></div>
-        <div id="ue-empty" class="empty-state" hidden>No UEs registered yet. Click &ldquo;Add UE&rdquo; to simulate one.</div>
+      </div>
+
+      <div class="bottom-row">
+
+      <!-- UE DATA PLANE -->
+      <div class="card dp-card">
+        <div class="card-header">
+          <div class="card-title">UE data plane <span class="muted" id="dp-target">— no UE attached</span></div>
+          <div class="status-pill" id="dp-pill">
+            <span class="status-dot"></span>
+            <span id="dp-pill-label">No PDU session</span>
+          </div>
+        </div>
+        <div class="dp-grid">
+          <div class="dp-pane">
+            <div class="dp-pane-head">
+              <span class="log-panel-title">Command console</span>
+              <span class="dp-hint">ping / curl · bound to the UE interface automatically</span>
+            </div>
+            <div id="dp-console" class="dp-output"></div>
+            <form id="dp-form" class="dp-form" autocomplete="off">
+              <span class="dp-prompt" id="dp-prompt">ue $</span>
+              <input id="dp-input" type="text" spellcheck="false" placeholder="ping -c 4 google.com">
+              <button type="submit" id="dp-run" class="btn btn-primary">Run</button>
+              <button type="button" id="dp-stop" class="btn btn-outline" disabled>Stop</button>
+            </form>
+            <div class="dp-presets" id="dp-presets">
+              <button type="button" class="chip" data-cmd="ping -c 4 google.com">ping -c 4 google.com</button>
+              <button type="button" class="chip" data-cmd="ping -c 4 8.8.8.8">ping -c 4 8.8.8.8</button>
+              <button type="button" class="chip" data-cmd="curl -sI https://www.google.com">curl -sI https://www.google.com</button>
+            </div>
+          </div>
+          <div class="dp-pane">
+            <div class="dp-pane-head">
+              <span class="log-panel-title">UDP inbox</span>
+              <span class="dp-hint" id="dp-udp-addr">not listening</span>
+              <button type="button" id="dp-udp-clear" class="dp-clear">Clear</button>
+            </div>
+            <div id="dp-udp" class="dp-output"></div>
+            <div class="dp-hint dp-udp-help" id="dp-udp-help">From the core host: <code>echo "hello" | nc -u -w1 &lt;UE IP&gt; 9000</code></div>
+          </div>
+        </div>
       </div>
 
       <!-- LOG PANEL -->
@@ -106,28 +114,8 @@
         <div id="log-lines" class="log-lines"></div>
       </div>
 
-    </div>
-  </div>
-</div>
+      </div>
 
-<!-- ADD UE MODAL -->
-<div class="modal-overlay" id="add-ue-modal" hidden>
-  <div class="modal">
-    <div class="modal-title">Add simulated UE</div>
-    <div class="modal-sub">Registers a new nr-ue instance against the current gNB. Only IMSIs already provisioned in the core will actually authenticate — anything else will visibly fail (this is real behavior, not a bug).</div>
-    <div class="modal-fields">
-      <div>
-        <label for="input-ue-name">Name</label>
-        <input id="input-ue-name" type="text" placeholder="e.g. lab-tablet">
-      </div>
-      <div>
-        <label for="input-ue-imsi">IMSI</label>
-        <input id="input-ue-imsi" type="text" placeholder="999700000000001">
-      </div>
-    </div>
-    <div class="modal-actions">
-      <button id="btn-modal-cancel" class="btn btn-outline">Cancel</button>
-      <button id="btn-modal-confirm" class="btn btn-primary">Add &amp; connect</button>
     </div>
   </div>
 </div>

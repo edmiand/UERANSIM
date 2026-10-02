@@ -4,6 +4,10 @@
   const state = {
     gnb: { state: "stopped", fields: {} },
     ues: [],
+    // per-UE data plane buffers, keyed by UE id
+    console: {},
+    udp: {},
+    cmdBusy: {},
   };
 
   // ── REST helpers ─────────────────────────────────────────────────────────
@@ -33,7 +37,12 @@
       if (msg.type === "snapshot") {
         state.gnb = msg.gnb;
         state.ues = msg.ues;
+        state.console = msg.console || {};
+        state.udp = msg.udp || {};
+        state.cmdBusy = {};
+        for (const u of msg.ues) state.cmdBusy[u.id] = !!u.cmdBusy;
         renderAll();
+        renderDataPlane(true);
         clearLog();
         msg.logs.forEach(appendLog);
       } else if (msg.type === "gnb_state") {
@@ -42,11 +51,25 @@
       } else if (msg.type === "ue_state") {
         const idx = state.ues.findIndex((u) => u.id === msg.id);
         const snap = { id: msg.id, name: msg.name, imsi: msg.imsi, state: msg.state,
-                       regState: msg.regState, rrcState: msg.rrcState, connected: msg.connected, iface: msg.iface };
+                       regState: msg.regState, rrcState: msg.rrcState, connected: msg.connected, iface: msg.iface,
+                       ip: msg.ip, udpPort: msg.udpPort, udpListening: msg.udpListening };
         if (idx === -1) state.ues.push(snap); else state.ues[idx] = snap;
         renderAll();
       } else if (msg.type === "log") {
         appendLog(msg);
+      } else if (msg.type === "ue_console") {
+        (state.console[msg.id] ||= []).push({ kind: msg.kind, text: msg.text });
+        if (msg.kind === "cmd") state.cmdBusy[msg.id] = true;
+        if (msg.kind === "exit") state.cmdBusy[msg.id] = false;
+        trimBuffer(state.console[msg.id], DP_CONSOLE_MAX);
+        if (dpTarget() && dpTarget().id === msg.id) {
+          appendConsoleLine(msg);
+          renderDataPlaneControls();
+        }
+      } else if (msg.type === "ue_udp") {
+        (state.udp[msg.id] ||= []).push({ time: msg.time, src: msg.src, text: msg.text });
+        trimBuffer(state.udp[msg.id], DP_UDP_MAX);
+        if (dpTarget() && dpTarget().id === msg.id) appendUdpMessage(msg);
       }
     };
 
@@ -68,7 +91,7 @@
       escapeHtml(entry.text);
     container.appendChild(line);
     while (container.children.length > LOG_MAX_LINES) container.removeChild(container.firstChild);
-    container.parentElement.scrollTop = container.parentElement.scrollHeight;
+    container.scrollTop = container.scrollHeight;
   }
 
   function escapeHtml(s) {
@@ -80,11 +103,142 @@
   // ── rendering ────────────────────────────────────────────────────────────
   function renderAll() {
     renderTopBar();
-    renderStatCards();
+    renderSummary();
     renderGnbCard();
     renderTopology();
     renderUeTable();
-    document.getElementById("nav-ue-badge").textContent = String(state.ues.filter((u) => u.connected).length);
+    renderDataPlane(false);
+  }
+
+  // ── UE data plane (command console + UDP inbox) ──────────────────────────
+  const DP_CONSOLE_MAX = 300;
+  const DP_UDP_MAX = 200;
+  let dpShownId = null;
+
+  function trimBuffer(buf, max) {
+    while (buf.length > max) buf.shift();
+  }
+
+  // Only one UE can run at a time (see UeRegistry.start), so the data plane card
+  // simply follows the attached UE, falling back to one that is still starting.
+  function dpTarget() {
+    return state.ues.find((u) => u.connected) || state.ues.find((u) => u.state === "starting") || null;
+  }
+
+  function scrollToEnd(el) {
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function appendConsoleLine(entry) {
+    const out = document.getElementById("dp-console");
+    out.querySelector(".dp-empty")?.remove();
+    const line = document.createElement("div");
+    if (entry.kind === "cmd") {
+      line.className = "dp-line-cmd";
+      line.textContent = "$ " + entry.text;
+    } else if (entry.kind === "exit") {
+      line.className = "dp-line-exit" + (entry.text === "exit code 0" ? "" : " bad");
+      line.textContent = "[" + entry.text + "]";
+    } else {
+      line.textContent = entry.text;
+    }
+    out.appendChild(line);
+    while (out.children.length > DP_CONSOLE_MAX) out.removeChild(out.firstChild);
+    scrollToEnd(out);
+  }
+
+  function appendUdpMessage(msg) {
+    const out = document.getElementById("dp-udp");
+    out.querySelector(".dp-empty")?.remove();
+    const row = document.createElement("div");
+    row.className = "dp-msg";
+    row.innerHTML =
+      `<span class="log-time">${escapeHtml(msg.time)}</span> ` +
+      `<span class="dp-msg-src">${escapeHtml(msg.src)}</span> ` +
+      escapeHtml(msg.text);
+    out.appendChild(row);
+    while (out.children.length > DP_UDP_MAX) out.removeChild(out.firstChild);
+    scrollToEnd(out);
+  }
+
+  function emptyNote(el, text) {
+    el.innerHTML = `<div class="dp-empty">${escapeHtml(text)}</div>`;
+  }
+
+  // Rebuilds both panes' contents only when the target UE changes (or on a fresh
+  // snapshot), so streaming lines and the half-typed command aren't disturbed.
+  function renderDataPlane(force) {
+    const ue = dpTarget();
+    const id = ue ? ue.id : null;
+    if (force || id !== dpShownId) {
+      dpShownId = id;
+      const consoleEl = document.getElementById("dp-console");
+      const udpEl = document.getElementById("dp-udp");
+      consoleEl.innerHTML = "";
+      udpEl.innerHTML = "";
+      const lines = id != null ? state.console[id] || [] : [];
+      const msgs = id != null ? state.udp[id] || [] : [];
+      if (lines.length) lines.forEach(appendConsoleLine); else emptyNote(consoleEl, "No commands run yet.");
+      if (msgs.length) msgs.forEach(appendUdpMessage); else emptyNote(udpEl, "No messages received yet.");
+    }
+    renderDataPlaneControls();
+  }
+
+  function renderDataPlaneControls() {
+    const ue = dpTarget();
+    const up = !!(ue && ue.connected && ue.ip);
+    const busy = !!(ue && state.cmdBusy[ue.id]);
+
+    document.getElementById("dp-target").textContent = ue
+      ? `— ${ue.name}${ue.ip ? ` · ${ue.iface} · ${ue.ip}` : ""}`
+      : "— no UE attached";
+    const pill = document.getElementById("dp-pill");
+    pill.style.background = up ? "var(--green-bg)" : "var(--border-lighter)";
+    pill.style.color = up ? "var(--green-text)" : "var(--text-dim)";
+    document.getElementById("dp-pill-label").textContent = up ? "PDU session up" : "No PDU session";
+
+    document.getElementById("dp-prompt").textContent = up ? `${ue.iface} $` : "ue $";
+    document.getElementById("dp-input").disabled = !up;
+    document.getElementById("dp-run").disabled = !up || busy;
+    document.getElementById("dp-stop").disabled = !up || !busy;
+    document.querySelectorAll("#dp-presets .chip").forEach((c) => { c.disabled = !up; });
+
+    const port = ue && ue.udpPort ? ue.udpPort : 9000;
+    document.getElementById("dp-udp-addr").textContent = ue && ue.udpListening
+      ? `listening on ${ue.ip}:${port}/udp`
+      : "not listening";
+    document.getElementById("dp-udp-help").innerHTML =
+      `From the core host: <code>echo "hello" | nc -u -w1 ${escapeHtml(up ? ue.ip : "<UE IP>")} ${port}</code>`;
+  }
+
+  async function runCommand(ev) {
+    ev.preventDefault();
+    const ue = dpTarget();
+    const input = document.getElementById("dp-input");
+    const cmd = input.value.trim();
+    if (!ue || !cmd) return;
+    try {
+      await api("POST", `/api/ues/${ue.id}/exec`, { cmd });
+      input.value = "";
+    } catch (e) {
+      appendConsoleLine({ kind: "exit", text: "rejected: " + e.message });
+    }
+  }
+
+  async function stopCommand() {
+    const ue = dpTarget();
+    if (!ue) return;
+    try {
+      await api("POST", `/api/ues/${ue.id}/exec/stop`);
+    } catch (e) {
+      alert(e.message);
+    }
+  }
+
+  function clearUdp() {
+    const ue = dpTarget();
+    if (ue) state.udp[ue.id] = [];
+    emptyNote(document.getElementById("dp-udp"), "No messages received yet.");
   }
 
   function renderTopBar() {
@@ -99,34 +253,23 @@
     amfNote.textContent = state.gnb.state === "attached" ? "AMF reachable" : "AMF not linked";
   }
 
-  function statCard(label, value, sub, dotColor, pulsing) {
-    const card = document.createElement("div");
-    card.className = "stat-card";
-    card.innerHTML = `
-      <div class="stat-card-head">
-        <span class="stat-card-label">${escapeHtml(label)}</span>
-        <span class="stat-card-dot" style="background:${dotColor}"></span>
-      </div>
-      <div class="stat-card-value">${escapeHtml(value)}</div>
-      <div class="stat-card-sub">${escapeHtml(sub)}</div>`;
-    return card;
+  function summaryItem(dotColor, label, value) {
+    return `<span class="summary-item"><span class="stat-card-dot" style="background:${dotColor}"></span>` +
+      `${escapeHtml(label)} <b>${escapeHtml(value)}</b></span>`;
   }
 
-  function renderStatCards() {
-    const container = document.getElementById("stat-cards");
-    container.innerHTML = "";
+  function renderSummary() {
     const g = state.gnb.state;
     const connected = state.ues.filter((u) => u.connected).length;
-    const registered = state.ues.filter((u) => u.regState === "registered").length;
-
-    container.appendChild(statCard(
-      "gNB status", g === "attached" ? "Running" : g === "starting" ? "Starting" : g === "failed" ? "Failed" : "Stopped",
-      g === "attached" ? "NGAP up · AMF linked" : "Not broadcasting",
-      g === "attached" ? "var(--green-dot)" : g === "failed" ? "var(--red-text)" : "var(--neutral-dot)",
-    ));
-    container.appendChild(statCard("Registered UEs", String(registered), `of ${state.ues.length} total`, "var(--blue)"));
-    container.appendChild(statCard("Active sessions", String(connected), "PDU sessions up", "var(--green-dot)"));
-    container.appendChild(statCard("UEs added", String(state.ues.length), "including stopped", "var(--amber-dot)"));
+    const registered = state.ues.some((u) => u.regState === "registered");
+    document.getElementById("summary").innerHTML = [
+      summaryItem(
+        g === "attached" ? "var(--green-dot)" : g === "failed" ? "var(--red-text)" : "var(--neutral-dot)",
+        "gNB", g === "attached" ? "Running" : g === "starting" ? "Starting" : g === "failed" ? "Failed" : "Stopped",
+      ),
+      summaryItem(registered ? "var(--blue)" : "var(--neutral-dot)", "UE", registered ? "Registered" : "Deregistered"),
+      summaryItem(connected ? "var(--green-dot)" : "var(--neutral-dot)", "PDU session", connected ? "Up" : "Down"),
+    ].join("");
   }
 
   const GNB_FIELD_LABELS = [
@@ -164,7 +307,6 @@
   function renderTopology() {
     const g = state.gnb.state;
     const connected = state.ues.filter((u) => u.connected).length;
-    document.getElementById("connected-ue-count").textContent = String(connected);
     document.getElementById("link-line-1").style.background = g === "attached" ? "var(--green-line)" : "var(--neutral-line)";
     document.getElementById("link-line-2").style.background = connected > 0 ? "var(--blue-line)" : "var(--neutral-line)";
     const gnbIcon = document.getElementById("gnb-node-icon");
@@ -197,14 +339,7 @@
 
   function renderUeTable() {
     const body = document.getElementById("ue-table-body");
-    const empty = document.getElementById("ue-empty");
-    document.getElementById("ue-count").textContent = String(state.ues.length);
     body.innerHTML = "";
-    if (state.ues.length === 0) {
-      empty.hidden = false;
-      return;
-    }
-    empty.hidden = true;
 
     for (const ue of state.ues) {
       const row = document.createElement("div");
@@ -230,7 +365,7 @@
 
       const ifaceCell = document.createElement("div");
       ifaceCell.className = "data-iface";
-      ifaceCell.textContent = ue.iface;
+      ifaceCell.textContent = ue.ip ? `${ue.iface} · ${ue.ip}` : ue.iface;
       row.appendChild(ifaceCell);
 
       const actions = document.createElement("div");
@@ -243,13 +378,6 @@
       toggleBtn.textContent = running ? "⏸" : "▶";
       toggleBtn.onclick = () => toggleUe(ue);
       actions.appendChild(toggleBtn);
-
-      const removeBtn = document.createElement("button");
-      removeBtn.className = "icon-btn danger";
-      removeBtn.title = "Remove";
-      removeBtn.textContent = "✕";
-      removeBtn.onclick = () => removeUe(ue);
-      actions.appendChild(removeBtn);
 
       row.appendChild(actions);
       body.appendChild(row);
@@ -275,44 +403,17 @@
     }
   }
 
-  async function removeUe(ue) {
-    try {
-      await api("DELETE", `/api/ues/${ue.id}`);
-      state.ues = state.ues.filter((u) => u.id !== ue.id);
-      renderAll();
-    } catch (e) {
-      alert(e.message);
-    }
-  }
-
-  // ── Add UE modal ─────────────────────────────────────────────────────────
-  function openModal() {
-    document.getElementById("input-ue-name").value = "";
-    document.getElementById("input-ue-imsi").value = "";
-    document.getElementById("add-ue-modal").hidden = false;
-  }
-  function closeModal() {
-    document.getElementById("add-ue-modal").hidden = true;
-  }
-  async function confirmAddUe() {
-    const name = document.getElementById("input-ue-name").value.trim();
-    const imsi = document.getElementById("input-ue-imsi").value.trim();
-    if (!imsi) { alert("IMSI is required"); return; }
-    try {
-      await api("POST", "/api/ues", { name, imsi });
-      closeModal();
-    } catch (e) {
-      alert(e.message);
-    }
-  }
-
   // ── wiring ───────────────────────────────────────────────────────────────
   document.getElementById("btn-toggle-gnb").onclick = toggleGnb;
-  document.getElementById("btn-add-ue").onclick = openModal;
-  document.getElementById("btn-modal-cancel").onclick = closeModal;
-  document.getElementById("btn-modal-confirm").onclick = confirmAddUe;
-  document.getElementById("add-ue-modal").addEventListener("click", (e) => {
-    if (e.target.id === "add-ue-modal") closeModal();
+  document.getElementById("dp-form").addEventListener("submit", runCommand);
+  document.getElementById("dp-stop").onclick = stopCommand;
+  document.getElementById("dp-udp-clear").onclick = clearUdp;
+  document.getElementById("dp-presets").addEventListener("click", (e) => {
+    const cmd = e.target.dataset && e.target.dataset.cmd;
+    if (!cmd) return;
+    const input = document.getElementById("dp-input");
+    input.value = cmd;
+    input.focus();
   });
 
   renderAll();

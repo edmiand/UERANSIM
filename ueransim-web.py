@@ -2,7 +2,7 @@
 """
 UERANSIM Web — browser dashboard for controlling and monitoring UERANSIM
 gNB and UE instances.
-Usage: python3 ueransim-web.py [--host 0.0.0.0] [--port 8088] [--gnb-config CONFIG] [--ue-config CONFIG]
+Usage: python3 ueransim-web.py [--host 0.0.0.0] [--port 8088] [--gnb-config CONFIG] [--ue-config CONFIG] [--udp-port 9000]
 """
 
 import argparse
@@ -11,7 +11,8 @@ import socket
 from aiohttp import web
 
 from ueransim_core import CFG
-from ueransim_web.server import make_app
+from ueransim_web.dataplane import UDP_PORT_DEFAULT
+from ueransim_web.server import UE_IMSI_DEFAULT, make_app
 
 
 def _local_ips() -> list[str]:
@@ -48,10 +49,15 @@ def main():
     parser.add_argument("--gnb-config", default=str(CFG / "open5gs-gnb.yaml"),
                         help="Path to gNB config YAML")
     parser.add_argument("--ue-config", default=str(CFG / "open5gs-ue.yaml"),
-                        help="Path to UE config YAML (base config; each added UE overrides IMSI via -i)")
+                        help="Path to UE config YAML (base config; the UE's IMSI is overridden via -i)")
+    parser.add_argument("--ue-imsi", default=UE_IMSI_DEFAULT,
+                        help=f"IMSI of the dashboard's single fixed UE (default: {UE_IMSI_DEFAULT})")
+    parser.add_argument("--udp-port", type=int, default=UDP_PORT_DEFAULT,
+                        help=f"UDP port the per-UE inbox listens on, bound to the UE's TUN IP "
+                             f"(default: {UDP_PORT_DEFAULT})")
     args = parser.parse_args()
 
-    app = make_app(args.gnb_config, args.ue_config)
+    app = make_app(args.gnb_config, args.ue_config, args.ue_imsi, args.udp_port)
     if args.host in ("0.0.0.0", "::"):
         reachable = _local_ips() or [args.host]
         for ip in reachable:

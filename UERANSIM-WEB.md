@@ -72,16 +72,21 @@ The unit's `User=`/`WorkingDirectory=`/`ExecStart=` paths are specific to the ma
 | `--host` | `0.0.0.0` | Bind address — all interfaces, reachable from the LAN on whatever IP this host has. Pass `--host 127.0.0.1` to restrict to localhost only. See Behavior Notes. |
 | `--port` | `8088` | Bind port. |
 | `--gnb-config` | `config/open5gs-gnb.yaml` | Path to gNB YAML config. |
-| `--ue-config` | `config/open5gs-ue.yaml` | Base UE YAML config; each added UE overrides its IMSI at launch via `nr-ue -i`. |
+| `--ue-config` | `config/open5gs-ue.yaml` | Base UE YAML config (key, OP, sessions, …); the IMSI is overridden at launch via `nr-ue -i`. |
+| `--ue-imsi` | `999700000000001` | IMSI of the dashboard's single fixed UE (`nr-ue-01`). |
+| `--udp-port` | `9000` | UDP port the UE data plane inbox listens on, bound to the UE's TUN IP. |
 
 ## Dashboard
 
-- **Top bar** — "+ Add UE" opens a modal to register a new simulated UE (name + IMSI); "Start/Stop gNB" toggles the single gNB process.
-- **Stat cards** — gNB status, registered UE count, active PDU sessions, and total UEs added.
-- **gNodeB card** — live config fields (MCC/MNC, TAC, NCI, Link IP, AMF address, GTP IP) parsed from the gNB YAML, plus a status pill.
-- **Link topology** — Core → gNB → UE(s) diagram; line/node colors reflect live connection state.
-- **User Equipment table** — one row per added UE: registration state, NAS CM-state, a coarse signal indicator, TUN interface name, and per-row start/stop (⏸/▶) and remove (✕) controls.
-- **Live log** — merged, color-tagged gNB/UE log stream (cyan `[gnb]`, green UE info, red on failure).
+The page is a single-screen layout (no sidebar): on a typical desktop viewport everything fits without page scrolling, and the console, UDP inbox, and log panes scroll internally. Below ~1100px wide it falls back to a stacked, page-scrolling layout.
+
+- **Top bar** — brand and AMF reachability; a one-line summary (gNB status · UE registration state · PDU session up/down); "Start/Stop gNB" toggles the single gNB process.
+- **gNodeB card** — status pill, a Core → gNB → UE link topology (line/node colors reflect live connection state), and live config fields (MCC/MNC, TAC, NCI, Link IP, AMF address, GTP IP) parsed from the gNB YAML.
+- **User Equipment table** — a single, permanently configured UE (`nr-ue-01`, `imsi-999700000000001` by default; see `--ue-imsi`): registration state, NAS CM-state, a coarse signal indicator, TUN interface name, and a start/stop (▶/⏸) control. UEs cannot be added or removed from the dashboard.
+- **UE data plane** — follows the attached UE (interface and IP are parsed from nr-ue's `TUN interface[uesimtun0, 10.45.0.x] is up` line). Two panes:
+  - **Command console** — runs `ping` or `curl` through the UE's PDU session. The interface is injected automatically (`ping -I <iface>`, `curl --interface <iface>`), so type `ping -c 4 google.com` or `curl -sI https://www.google.com` as-is. One command at a time; **Stop** sends SIGINT (so `ping` prints its summary). Commands without a bound (e.g. `ping` with no `-c`) are stopped after 600s.
+  - **UDP inbox** — the in-process equivalent of `nc -u -l <UE IP> 9000`: shows every datagram received on the UE's TUN IP with its sender. Unlike OpenBSD `nc -u -l` it accepts any number of senders and stays up between messages. Used as a downlink channel from the core network (Open5GS can't deliver SMS over NAS). Send from the core host with `echo "hello" | nc -u -w1 <UE IP> 9000`.
+- **Live log** — shown beside the data plane; merged, color-tagged gNB/UE log stream (cyan `[gnb]`, green UE info, red on failure).
 
 ## API Reference
 
@@ -91,24 +96,29 @@ Base path `/api`, WebSocket at `/ws`.
 |---|---|
 | `GET /api/gnb` | Current gNB state + parsed config fields |
 | `POST /api/gnb/start` / `/stop` | Start/stop the gNB process |
-| `GET /api/ues` | List all added UEs |
-| `POST /api/ues` `{name, imsi}` | Add a UE; auto-starts it if the gNB is attached |
-| `POST /api/ues/{id}/start` / `/stop` | Start/stop a specific UE |
-| `DELETE /api/ues/{id}` | Stop (if running) and remove a UE |
+| `GET /api/ues` | List UEs (always the single fixed UE, `id` 1) |
+| `POST /api/ues/{id}/start` / `/stop` | Start/stop the UE (start requires the gNB to be attached) |
 | `GET /api/ues/{id}/pdu` | Run `ps-list` (async — result arrives over `/ws`) |
 | `POST /api/ues/{id}/pdu/establish` | Run `ps-establish IPv4 --sst 1 --sd 1 --dnn internet` |
 | `POST /api/ues/{id}/pdu/release-all` | Run `ps-release-all` |
 | `POST /api/ues/{id}/deregister` | Run `deregister switch-off` |
+| `POST /api/ues/{id}/exec` `{cmd}` | Run a `ping`/`curl` command through the UE interface (output streams over `/ws`). `400` if the command is rejected, `409` if no PDU session or a command is already running |
+| `POST /api/ues/{id}/exec/stop` | Stop the running console command (SIGINT) |
+| `GET /api/ues/{id}/exec` | Console buffer: `{busy, lines: [{kind, text}]}` (last 300 lines) |
+| `GET /api/ues/{id}/udp` | UDP inbox: `{ip, port, listening, messages: [{time, src, text}]}` (last 200 messages) |
 
-`/ws` is server-push only: on connect it replays a full snapshot (gNB state, UE list, last ~50 log lines), then streams `log`, `gnb_state`, and `ue_state` events as they happen.
+`/ws` is server-push only: on connect it replays a full snapshot (gNB state, UE list, last ~50 log lines, per-UE console and UDP inbox buffers), then streams `log`, `gnb_state`, `ue_state`, `ue_console` (`{id, kind: cmd|out|exit, text}`) and `ue_udp` (`{id, time, src, text}`) events as they happen.
 
 ## Behavior Notes
 
 - **State derivation is identical to the TUI.** Both tools call the same `classify()` function in `ueransim_core.py`, driven by the same log-level/regex rules documented in [UERANSIM-TOOL.md's Behavior Notes](UERANSIM-TOOL.md#behavior-notes) (attach regexes, `[error]`/`[critical]` = failed, 20s starting-timeout fallback). No separate state logic exists for the web tool.
-- **Only one UE may run at a time.** Each `nr-ue` process numbers its TUN interfaces starting at `uesimtun0` independently — running two at once collides without network-namespace isolation, which this tool doesn't set up (`useNamespace` stays at its config default). The UE table supports adding multiple UE entries, but starting a second one while another is running/starting is rejected with `409` and a log line telling you to stop the first. Stop the running UE before starting another.
-- **Arbitrary IMSIs will genuinely fail authentication.** Only `imsi-999700000000001` is provisioned in the demo Open5GS core by default. Adding a UE with any other IMSI starts a real `nr-ue` process that will fail registration against the real core — this surfaces as a red "Failed" state via the same log classification as any other failure, it is not special-cased or faked.
+- **One fixed UE.** The backend creates exactly one UE at startup from `--ue-imsi` (default `999700000000001`, the IMSI provisioned in the demo Open5GS core) and `--ue-config`; there is no add/remove API. Running a single `nr-ue` also avoids `uesimtun0` collisions, since each `nr-ue` numbers its TUN interfaces independently. Passing an unprovisioned `--ue-imsi` starts a real `nr-ue` that genuinely fails registration — surfaced as a red "Failed" state, not faked.
 - **No fabricated telemetry.** The UE table's "Signal" column is a coarse indicator derived from connection state (stopped/starting/attached/failed), not a real RSRP measurement — UERANSIM's `nr-cli status` command doesn't expose one. The "RRC state" column shows the UE's real NAS CM-state (`CM-IDLE`/`CM-CONNECTED`, from periodic `nr-cli <node> --exec status` polling), the closest real signal available.
-- **In-memory state only, no persistence.** Restarting `ueransim-web.py` forgets all added UEs and their state. Any `nr-gnb`/`nr-ue` process still running at that point becomes orphaned (it keeps running under its original PID, no longer tracked by the new backend instance) — stop everything from the dashboard before restarting the web tool.
-- **Reachable on all interfaces by default, no authentication.** This is local operator tooling that spawns `sudo`-invoked processes; the `--host` default (`0.0.0.0`) makes it reachable from any network this host is on, with no login and no access control. Anything that can reach the host's IP can start/stop the gNB, add UEs, and run arbitrary PDU/deregister commands. Pass `--host 127.0.0.1` to restrict it to the local machine only.
+- **In-memory state only, no persistence.** Restarting `ueransim-web.py` resets the UE and gNB state (the fixed UE is recreated, stopped). Any `nr-gnb`/`nr-ue` process still running at that point becomes orphaned (it keeps running under its original PID, no longer tracked by the new backend instance) — stop everything from the dashboard before restarting the web tool.
+- **Reachable on all interfaces by default, no authentication.** This is local operator tooling that spawns `sudo`-invoked processes; the `--host` default (`0.0.0.0`) makes it reachable from any network this host is on, with no login and no access control. Anything that can reach the host's IP can start/stop the gNB and UE, and run arbitrary PDU/deregister commands. Pass `--host 127.0.0.1` to restrict it to the local machine only.
+- **Data plane console is restricted.** Since the dashboard is unauthenticated, the console runs only `ping` and `curl`, executed directly (no shell) as the dashboard's user. It rejects options that would escape the UE interface (`ping -I`, `curl --interface`), flood (`ping -f`), or read/write local files (`curl -o/-O/-K/-T/-F/-b/-c/-D/...`, `-d @file`). It also forces `--proto =http,https` (no `file://`) and `-q` (ignores `~/.curlrc`).
+- **Data plane requires `useNamespace: false`.** The console and inbox use the UE's TUN interface in the host namespace. With `useNamespace: true` they stay disabled and the UE log says why.
+- **Inbox only receives traffic that crosses the 5G user plane when the core runs on another host.** On the same host, `10.45.0.x` is a local address and packets would skip UPF → GTP-U → gNB. With the core on a separate host, a datagram sent from it to the UE IP is routed via the UPF's `ogstun`, as intended. The UE host firewall must allow inbound UDP on the inbox port on the TUN interface.
+- **Internet reachability depends on the core host.** If `ping 10.45.0.1` (the UPF) works but `ping google.com` doesn't, the core host is missing IP forwarding / NAT (MASQUERADE) for the UE subnet. That is an Open5GS host setup issue, not a dashboard one.
 - **sudo required for UE.** Same requirement and setup as the TUI — see [UERANSIM-TOOL.md's sudoers instructions](UERANSIM-TOOL.md#behavior-notes); this tool does not re-derive them.
 - **Graceful shutdown.** `Ctrl-C` on the web server stops the gNB and all UE processes before exiting (aiohttp `on_shutdown` hook), same spirit as the TUI's Quit action.
