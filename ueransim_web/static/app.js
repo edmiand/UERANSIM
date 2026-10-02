@@ -64,7 +64,8 @@
         const idx = state.ues.findIndex((u) => u.id === msg.id);
         const snap = { id: msg.id, name: msg.name, imsi: msg.imsi, state: msg.state,
                        regState: msg.regState, rrcState: msg.rrcState, connected: msg.connected, iface: msg.iface,
-                       ip: msg.ip, udpPort: msg.udpPort, udpListening: msg.udpListening };
+                       ip: msg.ip, udpPort: msg.udpPort, udpListening: msg.udpListening,
+                       httpListening: msg.httpListening };
         if (idx === -1) state.ues.push(snap); else state.ues[idx] = snap;
         if (msg.state !== "attached") delete state.pduReleased[msg.id];
         renderAll();
@@ -80,7 +81,8 @@
           renderDataPlaneControls();
         }
       } else if (msg.type === "ue_udp") {
-        (state.udp[msg.id] ||= []).push({ time: msg.time, src: msg.src, text: msg.text });
+        (state.udp[msg.id] ||= []).push({ time: msg.time, proto: msg.proto, src: msg.src,
+                                          text: msg.text, incident: msg.incident });
         trimBuffer(state.udp[msg.id], DP_UDP_MAX);
         if (dpTarget() && dpTarget().id === msg.id) appendUdpMessage(msg);
         renderInboxBadge();
@@ -347,7 +349,7 @@
       ["Phone interface", isOnline(ue) ? ue.iface : null],
       ["Registration (5GMM)", ue ? ue.regState : null],
       ["Connection (CM)", ue ? ue.rrcState : null],
-      ["UDP inbox port", ue ? ue.udpPort : null],
+      ["Inbox port (UDP + TCP)", ue ? ue.udpPort : null],
     );
     el.innerHTML = rows.map(([label, v]) =>
       `<div><div class="field-label">${escapeHtml(label)}</div><div class="field-value">${escapeHtml(v == null || v === "" ? "—" : v)}</div></div>`).join("");
@@ -391,8 +393,11 @@
     out.querySelector(".inbox-empty")?.remove();
     const row = document.createElement("div");
     row.className = "msg";
+    const via = msg.proto === "http" ? "HTTP" : "UDP";
+    const incident = msg.incident ? ` · incident ${escapeHtml(msg.incident)}` : "";
     row.innerHTML =
-      `<div class="msg-meta"><b>From ${escapeHtml(msg.src)}</b><span>${escapeHtml(msg.time)}</span></div>` +
+      `<div class="msg-meta"><b>From ${escapeHtml(msg.src)}</b>` +
+      `<span>${via}${incident} · ${escapeHtml(msg.time)}</span></div>` +
       `<div class="msg-text">${escapeHtml(msg.text)}</div>`;
     out.insertBefore(row, out.firstChild);
     while (out.children.length > DP_UDP_MAX) out.removeChild(out.lastChild);
@@ -412,7 +417,9 @@
     const ip = isOnline(ue) ? ue.ip : "<phone IP>";
     document.getElementById("dp-udp").innerHTML =
       `<div class="inbox-empty"><b>No messages yet</b>Send one from the core host:` +
-      `<code>echo "hello" | nc -u -w1 ${escapeHtml(ip)} ${port}</code></div>`;
+      `<code>echo "hello" | nc -u -w1 ${escapeHtml(ip)} ${port}</code>` +
+      `<code>curl -X POST http://${escapeHtml(ip)}:${port}/notify -H 'Content-Type: application/json' ` +
+      `-d '{"message":"hello"}'</code></div>`;
   }
 
   // Rebuilds both panes only when the target UE changes (or on a fresh snapshot),
@@ -450,10 +457,15 @@
     document.querySelectorAll("#dp-presets .chip").forEach((c) => { c.disabled = !up || busy; });
 
     const port = ue && ue.udpPort ? ue.udpPort : 9000;
-    const listening = !!(ue && ue.udpListening);
+    const udp = !!(ue && ue.udpListening);
+    const http = !!(ue && ue.httpListening);
+    const listening = udp || http;
     document.getElementById("listen-label").textContent = listening ? `Listening on ${ue.ip}:${port}` : "Not listening";
-    setTone(document.getElementById("listen-pill"), listening ? "ok" : "idle");
-    document.getElementById("listen-note").textContent = `The phone receives UDP messages on port ${port}.`;
+    setTone(document.getElementById("listen-pill"), udp && http ? "ok" : listening ? "busy" : "idle");
+    const via = [udp && "UDP", http && "HTTP POST /notify (TCP)"].filter(Boolean).join(" and ");
+    document.getElementById("listen-note").textContent = listening
+      ? `The phone receives ${via} messages on port ${port}.`
+      : `The phone receives UDP and HTTP POST /notify (TCP) messages on port ${port}.`;
   }
 
   function renderInboxBadge() {

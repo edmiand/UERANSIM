@@ -15,7 +15,7 @@ from ueransim_core import (
     GNB_ATTACH_RE, UE_ATTACH_RE, STARTING_TIMEOUT_SECS,
     NodeProcess, classify, cli_exec,
 )
-from ueransim_web.dataplane import UE_TUN_RE, UDP_PORT_DEFAULT, CommandConsole, UdpInbox
+from ueransim_web.dataplane import UE_TUN_RE, UDP_PORT_DEFAULT, CommandConsole, MessageInbox
 
 # How often a running UE's NAS state (cm-state/rm-state, via `nr-cli <node> --exec status`)
 # is polled to refresh the reg/RRC-ish columns in the UE table between log-driven transitions.
@@ -149,12 +149,12 @@ class UeEntry:
         self._timeout_task: Optional[asyncio.Task] = None
         self._poll_task: Optional[asyncio.Task] = None
         # TUN details parsed from nr-ue's attach line: {"iface", "ip", "ns"}; None while
-        # no PDU session is up. Drives the data-plane console and the UDP inbox.
+        # no PDU session is up. Drives the data-plane console and the message inbox.
         self.tun: Optional[dict] = None
         self._on_dataplane = on_dataplane
         self.console = CommandConsole(
             lambda kind, text: on_dataplane(self, {"type": "ue_console", "kind": kind, "text": text}))
-        self.inbox = UdpInbox(
+        self.inbox = MessageInbox(
             udp_port, lambda msg: on_dataplane(self, {"type": "ue_udp", **msg}))
 
     @property
@@ -188,6 +188,7 @@ class UeEntry:
             "ip": self.tun["ip"] if self.tun else None,
             "udpPort": self.inbox.port,
             "udpListening": self.inbox.listening,
+            "httpListening": self.inbox.http_listening,
             "cmdBusy": self.console.busy,
         }
 
@@ -225,25 +226,27 @@ class UeEntry:
             await self._proc.stop()
             self._stopping = False
 
-    # ── data plane (console + UDP inbox) ─────────────────────────────────────
+    # ── data plane (console + message inbox) ─────────────────────────────────────
     async def _start_inbox(self):
         tun = self.tun
         if tun is None:
             return
         if tun["ns"]:
-            self._log(f"[yellow]UE TUN is in namespace {tun['ns']} — the UDP inbox and "
+            self._log(f"[yellow]UE TUN is in namespace {tun['ns']} — the message inbox and "
                       f"command console only support useNamespace: false[/yellow]")
             return
-        try:
-            await self.inbox.start(tun["ip"])
-            self._log(f"[green]UDP inbox listening on {tun['ip']}:{self.inbox.port}[/green]")
-        except OSError as e:
-            self._log(f"[yellow]UDP inbox could not bind {tun['ip']}:{self.inbox.port}: {e}[/yellow]")
+        errors = await self.inbox.start(tun["ip"])
+        for err in errors:
+            self._log(f"[yellow]Message inbox could not bind {tun['ip']}:{self.inbox.port} {err}[/yellow]")
+        if len(errors) < 2:
+            self._log(f"[green]Message inbox listening on {tun['ip']}:{self.inbox.port} "
+                      f"(UDP: {'yes' if self.inbox.listening else 'no'}, "
+                      f"HTTP POST /notify: {'yes' if self.inbox.http_listening else 'no'})[/green]")
         self._on_state(self)
 
     def _teardown_dataplane(self):
         self.tun = None
-        self.inbox.close()
+        asyncio.create_task(self.inbox.close())
         if self.console.busy:
             asyncio.create_task(self.console.stop())
 

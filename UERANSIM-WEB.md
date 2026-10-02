@@ -74,7 +74,7 @@ The unit's `User=`/`WorkingDirectory=`/`ExecStart=` paths are specific to the ma
 | `--gnb-config` | `config/open5gs-gnb.yaml` | Path to gNB YAML config. |
 | `--ue-config` | `config/open5gs-ue.yaml` | Base UE YAML config (key, OP, sessions, …); the IMSI is overridden at launch via `nr-ue -i`. |
 | `--ue-imsi` | `999700000000001` | IMSI of the dashboard's single fixed UE (`nr-ue-01`). |
-| `--udp-port` | `9000` | UDP port the UE data plane inbox listens on, bound to the UE's TUN IP. |
+| `--udp-port` | `9000` | Port the UE message inbox listens on, bound to the UE's TUN IP — both UDP and TCP (HTTP `POST /notify`). |
 
 ## Dashboard
 
@@ -84,7 +84,11 @@ The page is aimed at people who don't work with telecom. It uses plain-language 
 - **Your network** — four equal-width cards left to right in the order data flows: **Phone → gNB → Core network → Internet**. Each card shows its 3GPP name underneath (UE · IMSI; gNB node name · PLMN · TAC · NCI; 5GC · AMF address; DNN · TUN interface) and a live status pill. Phone has Power on/off (start/stop the single fixed UE, `nr-ue-01`, `imsi-999700000000001` by default; see `--ue-imsi`) plus Connect/Disconnect beside it (`ps-establish` / `ps-release-all`); gNB has Start/Stop. The connectors between cards (Radio, Linked, Data) light up as each link comes up. **Technical details** expands the gNB config fields parsed from the gNB YAML (MCC, MNC, NCI, TAC, AMF address, GTP IP, link IP) and the UE's IMSI, IP, interface, registration state, NAS CM-state and UDP port.
 - **UE Console** — follows the attached UE (interface and IP are parsed from nr-ue's `TUN interface[uesimtun0, 10.45.0.x] is up` line). Two tabs:
   - **Send traffic** — quick-test buttons (ping google.com, ping 8.8.8.8, load a web page) plus a command line that runs `ping` or `curl` through the UE's PDU session. The interface is injected automatically (`ping -I <iface>`, `curl --interface <iface>`), so type `ping -c 4 google.com` or `curl -sI https://www.google.com` as-is. One command at a time; **Stop** sends SIGINT (so `ping` prints its summary). Commands without a bound (e.g. `ping` with no `-c`) are stopped after 600s.
-  - **Incoming messages** — the UDP inbox, the in-process equivalent of `nc -u -l <UE IP> 9000`: shows every datagram received on the UE's TUN IP with its sender, newest first. Unlike OpenBSD `nc -u -l` it accepts any number of senders and stays up between messages. Used as a downlink channel from the core network (Open5GS can't deliver SMS over NAS). Send from the core host with `echo "hello" | nc -u -w1 <UE IP> 9000`.
+  - **Incoming messages** — a downlink message inbox on the UE's TUN IP (Open5GS can't deliver SMS over NAS), showing each message with its sender, protocol and time, newest first. It listens on two sockets on the same port:
+    - **UDP** — the in-process equivalent of `nc -u -l <UE IP> 9000`. Unlike OpenBSD `nc -u -l` it accepts any number of senders and stays up between messages. Send from the core host with `echo "hello" | nc -u -w1 <UE IP> 9000`.
+    - **TCP, HTTP `POST /notify`** — the contract of NetAgent's `send_ue_notification` MCP tool, a drop-in replacement for its `scripts/ue_notify_listener.py`. Body is JSON `{"message": "<non-empty string>", "incident_id": "<string or null>"}` (max 4096 bytes). Reply is `200 {"ok": true, "received_at": "<ISO time>", "incident_id": ...}`, or `{"ok": false, "error": ...}` with 400/411/413. The incident ID is shown next to the message. Send from the core host with `curl -X POST http://<UE IP>:9000/notify -H 'Content-Type: application/json' -d '{"message":"hello","incident_id":"INC-1"}'`.
+
+    Each socket binds independently: if one port is already taken (for example `ue_notify_listener.py` still running on TCP 9000), the Activity log shows a yellow "could not bind" line and the other socket keeps working. The pill turns amber when only one is listening. Both rebind automatically to the new IP every time the UE gets a PDU session, so the inbox follows UE restarts.
 - **Activity** — **Highlights** shows plain-language milestones derived client-side from known log lines (gNB linked to the core, phone registered, phone online with its IP, …), every failure line, and dashboard button presses, newest first. **Full log** is the merged, color-tagged gNB/UE log stream (cyan `[gnb]`, green UE info, red on failure).
 
 The details panel and the selected tabs are remembered per browser (`localStorage`).
@@ -106,9 +110,9 @@ Base path `/api`, WebSocket at `/ws`.
 | `POST /api/ues/{id}/exec` `{cmd}` | Run a `ping`/`curl` command through the UE interface (output streams over `/ws`). `400` if the command is rejected, `409` if no PDU session or a command is already running |
 | `POST /api/ues/{id}/exec/stop` | Stop the running console command (SIGINT) |
 | `GET /api/ues/{id}/exec` | Console buffer: `{busy, lines: [{kind, text}]}` (last 300 lines) |
-| `GET /api/ues/{id}/udp` | UDP inbox: `{ip, port, listening, messages: [{time, src, text}]}` (last 200 messages) |
+| `GET /api/ues/{id}/udp` | Message inbox (UDP + HTTP `/notify`): `{ip, port, listening, httpListening, messages: [{time, proto: udp\|http, src, text, incident}]}` (last 200 messages) |
 
-`/ws` is server-push only: on connect it replays a full snapshot (gNB state, UE list, last ~50 log lines, per-UE console and UDP inbox buffers), then streams `log` (`{source, tag, color, level: info|success|fail, time, text}`), `gnb_state`, `ue_state`, `ue_console` (`{id, kind: cmd|out|exit, text}`) and `ue_udp` (`{id, time, src, text}`) events as they happen.
+`/ws` is server-push only: on connect it replays a full snapshot (gNB state, UE list, last ~50 log lines, per-UE console and message inbox buffers), then streams `log` (`{source, tag, color, level: info|success|fail, time, text}`), `gnb_state`, `ue_state`, `ue_console` (`{id, kind: cmd|out|exit, text}`) and `ue_udp` (`{id, time, proto, src, text, incident}`) events as they happen.
 
 ## Behavior Notes
 

@@ -174,7 +174,7 @@ def make_app(gnb_config: str, ue_config: str, ue_imsi: str = UE_IMSI_DEFAULT,
     async def deregister(request):
         return await _pdu_action(request, "deregister switch-off", "deregister")
 
-    # ── data plane: command console + UDP inbox ─────────────────────────────
+    # ── data plane: command console + message inbox ─────────────────────────────
     async def run_command(request):
         ue_id = int(request.match_info["id"])
         entry = ues.get(ue_id)
@@ -213,6 +213,7 @@ def make_app(gnb_config: str, ue_config: str, ue_imsi: str = UE_IMSI_DEFAULT,
             "ip": entry.inbox.bound_ip,
             "port": entry.inbox.port,
             "listening": entry.inbox.listening,
+            "httpListening": entry.inbox.http_listening,
             "messages": list(entry.inbox.buffer),
         })
 

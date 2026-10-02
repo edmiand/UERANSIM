@@ -1,19 +1,25 @@
 """
 Per-UE data-plane tools for the web dashboard: a restricted command console
-(ping / curl, auto-bound to the UE's TUN interface) and a UDP inbox listening
-on the UE's TUN IP for messages sent from the core network side.
+(ping / curl, auto-bound to the UE's TUN interface) and a message inbox listening
+on the UE's TUN IP for messages sent from the core network side — raw UDP
+datagrams and HTTP `POST /notify` over TCP (NetAgent's send_ue_notification
+MCP tool), both on the same port.
 
 Both only make sense while the UE has a PDU session up, so UeEntry starts
 and stops them from its attach / stop transitions (see registry.py).
 """
 
 import asyncio
+import json
 import re
 import shlex
 import signal
 import time
 from collections import deque
+from datetime import datetime
 from typing import Callable, Optional
+
+from aiohttp import web
 
 # nr-ue's attach line (src/ue/app/task.cpp) carries the TUN interface name, its IP and,
 # with useNamespace: true, the namespace name. NodeProcess rich_escape()s every line, so
@@ -26,6 +32,8 @@ UE_TUN_RE = re.compile(
 
 UDP_PORT_DEFAULT = 9000
 UDP_BUFFER_MAX = 200
+# send_ue_notification caps the message at 500 chars; leave headroom for JSON + incident_id.
+NOTIFY_BODY_MAX = 4096
 CONSOLE_BUFFER_MAX = 300
 # Safety net for commands the operator forgot to bound (e.g. `ping` without -c).
 CMD_MAX_SECS = 600
@@ -183,15 +191,25 @@ class _UdpProtocol(asyncio.DatagramProtocol):
         self._on_datagram(data, addr)
 
 
-class UdpInbox:
-    """Listens on <UE TUN IP>:<port>/udp — the in-process equivalent of
-    `nc -u -l <ip> <port>`, but accepting datagrams from any sender (OpenBSD
-    nc locks onto the first peer) and staying up across messages."""
+class MessageInbox:
+    """Listens on <UE TUN IP>:<port> for downlink messages from the core side:
+
+    - UDP: the in-process equivalent of `nc -u -l <ip> <port>`, but accepting
+      datagrams from any sender (OpenBSD nc locks onto the first peer) and
+      staying up across messages.
+    - TCP: HTTP `POST /notify` with JSON {"message", "incident_id"}, the contract
+      of NetAgent's send_ue_notification MCP tool (same request validation and
+      {"ok", "received_at", "incident_id"} reply as its ue_notify_listener.py).
+
+    Either socket may fail to bind independently (e.g. the standalone
+    ue_notify_listener.py already holds the TCP port); the other keeps working.
+    """
 
     def __init__(self, port: int, emit: Callable[[dict], None]):
         self.port = port
         self._emit = emit
         self._transport: Optional[asyncio.DatagramTransport] = None
+        self._http: Optional[web.AppRunner] = None
         self.bound_ip: Optional[str] = None
         self.buffer: deque = deque(maxlen=UDP_BUFFER_MAX)
 
@@ -199,25 +217,79 @@ class UdpInbox:
     def listening(self) -> bool:
         return self._transport is not None
 
-    async def start(self, ip: str):
-        self.close()
-        loop = asyncio.get_running_loop()
-        self._transport, _ = await loop.create_datagram_endpoint(
-            lambda: _UdpProtocol(self._received), local_addr=(ip, self.port),
-        )
-        self.bound_ip = ip
+    @property
+    def http_listening(self) -> bool:
+        return self._http is not None
 
-    def _received(self, data: bytes, addr):
+    async def start(self, ip: str) -> list[str]:
+        """Bind both sockets to ip; returns one error string per socket that failed."""
+        await self.close()
+        self.bound_ip = ip
+        errors = []
+        loop = asyncio.get_running_loop()
+        try:
+            self._transport, _ = await loop.create_datagram_endpoint(
+                lambda: _UdpProtocol(self._udp_received), local_addr=(ip, self.port),
+            )
+        except OSError as e:
+            errors.append(f"UDP: {e}")
+        app = web.Application(client_max_size=NOTIFY_BODY_MAX)
+        app.router.add_post("/notify", self._notify)
+        runner = web.AppRunner(app, access_log=None)
+        await runner.setup()
+        try:
+            await web.TCPSite(runner, ip, self.port).start()
+            self._http = runner
+        except OSError as e:
+            await runner.cleanup()
+            errors.append(f"TCP: {e}")
+        return errors
+
+    def _add(self, proto: str, addr, text: str, incident: Optional[str] = None) -> dict:
         msg = {
             "time": time.strftime("%H:%M:%S"),
-            "src": f"{addr[0]}:{addr[1]}",
-            "text": data.decode(errors="replace").rstrip("\r\n"),
+            "proto": proto,
+            "src": f"{addr[0]}:{addr[1]}" if addr else "?",
+            "text": text,
+            "incident": incident,
         }
         self.buffer.append(msg)
         self._emit(msg)
+        return msg
 
-    def close(self):
+    def _udp_received(self, data: bytes, addr):
+        self._add("udp", addr, data.decode(errors="replace").rstrip("\r\n"))
+
+    async def _notify(self, request: web.Request) -> web.Response:
+        def reject(status: int, error: str):
+            return web.json_response({"ok": False, "error": error}, status=status)
+
+        if request.content_length is None:
+            return reject(411, "Content-Length required")
+        if request.content_length > NOTIFY_BODY_MAX:
+            return reject(413, f"body exceeds {NOTIFY_BODY_MAX} bytes")
+        try:
+            data = json.loads(await request.read())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return reject(400, "body is not valid JSON")
+        if not isinstance(data, dict):
+            return reject(400, "body must be a JSON object")
+        message = data.get("message")
+        incident_id = data.get("incident_id")
+        if not isinstance(message, str) or not message.strip():
+            return reject(400, "'message' must be a non-empty string")
+        if incident_id is not None and not isinstance(incident_id, str):
+            return reject(400, "'incident_id' must be a string or null")
+
+        self._add("http", request.transport.get_extra_info("peername"), message, incident_id)
+        received_at = datetime.now().astimezone().isoformat(timespec="seconds")
+        return web.json_response({"ok": True, "received_at": received_at, "incident_id": incident_id})
+
+    async def close(self):
         if self._transport is not None:
             self._transport.close()
         self._transport = None
+        if self._http is not None:
+            runner, self._http = self._http, None
+            await runner.cleanup()
         self.bound_ip = None
