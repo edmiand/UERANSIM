@@ -63,7 +63,7 @@ sudo systemctl stop ueransim-web       # stop it (or: ./web-ctl.sh stop)
 sudo systemctl disable ueransim-web    # stop autostarting on boot
 ```
 
-The unit's `User=`/`WorkingDirectory=`/`ExecStart=` paths are specific to the machine it was generated for — edit `systemd/ueransim-web.service` before installing it on a different host or under a different user. The unit also passes `--gnb-config config/lab-gnb.yaml`, the lab-specific gNB config (AMF at 192.168.64.4, host at 192.168.64.5); point it at your own config elsewhere. `config/open5gs-gnb.yaml` currently carries the same lab addresses, so `./start-gnb.sh`, the TUI and the dashboard without `--gnb-config` also reach the lab AMF.
+The unit's `User=`/`WorkingDirectory=`/`ExecStart=` paths are specific to the machine it was generated for — edit `systemd/ueransim-web.service` before installing it on a different host or under a different user. The unit uses the default gNB config, `config/open5gs-gnb.yaml`, which carries the lab addresses (AMF at 192.168.64.4, host at 192.168.64.5); point it at your own config elsewhere.
 
 ### Options
 
