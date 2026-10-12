@@ -30,7 +30,7 @@ pip3 install aiohttp
                    --host 0.0.0.0 --port 8088
 ```
 
-The startup banner prints the actual reachable URL(s) for the host it's running on (e.g. `http://192.168.64.20:8088`) — bind defaults to `0.0.0.0` precisely so this works unchanged on any machine/VM regardless of its IP.
+The startup banner prints the actual reachable URL(s) for the host it's running on (e.g. `http://192.168.64.5:8088`) — bind defaults to `0.0.0.0` precisely so this works unchanged on any machine/VM regardless of its IP.
 
 `web-ctl.sh` is a lifecycle wrapper, same convention as `start-gnb.sh`/`start-ue.sh`, with `start`/`stop`/`restart`/`status`/`run` subcommands:
 
@@ -63,7 +63,7 @@ sudo systemctl stop ueransim-web       # stop it (or: ./web-ctl.sh stop)
 sudo systemctl disable ueransim-web    # stop autostarting on boot
 ```
 
-The unit's `User=`/`WorkingDirectory=`/`ExecStart=` paths are specific to the machine it was generated for — edit `systemd/ueransim-web.service` before installing it on a different host or under a different user.
+The unit's `User=`/`WorkingDirectory=`/`ExecStart=` paths are specific to the machine it was generated for — edit `systemd/ueransim-web.service` before installing it on a different host or under a different user. The unit also passes `--gnb-config config/lab-gnb.yaml`, the lab-specific gNB config (AMF at 192.168.64.4, host at 192.168.64.5); point it at your own config elsewhere. `config/open5gs-gnb.yaml` stays the stock loopback default.
 
 ### Options
 
